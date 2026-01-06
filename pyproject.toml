@@ -4,14 +4,34 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sauerkraut"
-version = "0.1"
+version = "0.1.0"
 description = "Serialization for Python's Control State"
 readme = "README.md"
 requires-python = ">=3.13"
+license = {text = "Apache-2.0 WITH LLVM-exception"}
 authors = [
     {name = "Zane Fink", email = "zanef2@illinois.edu"}
+]
+keywords = ["serialization", "pickle", "greenlet", "coroutine", "checkpoint", "migration"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: C++",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Distributed Computing",
 ]
 dependencies = [
     "bytecode",
     "numpy",
 ]
+
+[project.urls]
+Homepage = "https://github.com/UIUC-PPL/sauerkraut"
+Repository = "https://github.com/UIUC-PPL/sauerkraut"
+Issues = "https://github.com/UIUC-PPL/sauerkraut/issues"

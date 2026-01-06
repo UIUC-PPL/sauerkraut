@@ -1,0 +1,20 @@
+# CMake build files
+include CMakeLists.txt
+include sauerkraut/CMakeLists.txt
+include sauerkraut/buffer/CMakeLists.txt
+include sauerkraut/serdes/CMakeLists.txt
+include sauerkraut/greenlet_compat/CMakeLists.txt
+
+# C++ source files
+include sauerkraut/*.C
+include sauerkraut/serdes/*.C
+include sauerkraut/greenlet_compat/*.C
+
+# Header files
+recursive-include sauerkraut/include *.h
+recursive-include sauerkraut/buffer/include *.h
+recursive-include sauerkraut/serdes/include *.h
+recursive-include sauerkraut/greenlet_compat/include *.h
+
+# FlatBuffers schemas
+recursive-include sauerkraut/buffer *.fbs
