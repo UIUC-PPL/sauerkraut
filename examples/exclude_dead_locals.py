@@ -1,7 +1,7 @@
 import sauerkraut as skt
 
-import sauerkraut as skt
 import greenlet
+
 
 def fun1():
     a = 1
@@ -24,8 +24,10 @@ def fun1():
 def main():
     gr1 = greenlet.greenlet(fun1)
     gr1.switch()
-    serframe = skt.copy_frame_from_greenlet(gr1, exclude_dead_locals=True, serialize=True)
-    res = skt.deserialize_frame(serframe,run=True, replace_locals={'a': 22, 'c': 35})
+    serframe = skt.copy_frame_from_greenlet(
+        gr1, exclude_dead_locals=True, serialize=True
+    )
+    res = skt.deserialize_frame(serframe, run=True, replace_locals={"a": 22, "c": 35})
     print(f"The result is {res}")
 
     # deserframe = skt.deserialize_frame(serframe)
@@ -37,6 +39,7 @@ def main():
     #     res = skt.run_frame(deserframe, replace_locals={'c': 200})
     # except TypeError as e:
     #     print("When you forget to replace an excluded local, 'None' is used in its place!")
+
 
 if __name__ == "__main__":
     main()
