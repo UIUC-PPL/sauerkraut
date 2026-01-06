@@ -634,33 +634,6 @@ static PyObject *copy_frame(PyObject *self, PyObject *args, PyObject *kwargs) {
     }
 }
 
-static PyObject *copy_and_run_frame(PyObject *self, PyObject *args) {
-    using namespace utils;
-    struct _frame *frame = (struct _frame*) PyEval_GetFrame();
-    PyThreadState *tstate = PyThreadState_Get();
-    (void) tstate;
-    pycode_strongref code = pycode_strongref::steal(PyFrame_GetCode(frame));
-    assert(code.borrow() != NULL);
-    PyCodeObject *copy_code_obj = (PyCodeObject *)deepcopy_object((PyObject*)code.borrow());
-
-    Py_ssize_t offset = py::get_instr_offset<py::Units::Bytes>(frame) + py::get_offset_for_skipping_call(py::get_current_opcode(frame));
-    (void) offset;
-    PyObject *FrameLocals = GetFrameLocalsFromFrame((PyObject*)frame);
-    (void) FrameLocals;
-    PyObject *LocalCopy = PyDict_Copy(FrameLocals);
-    (void) LocalCopy;
-
-    // PyFrameObject *new_frame = create_copied_frame(tstate, to_copy, copy_code_obj, LocalCopy, offset, 1, 0, 1, 1);
-    PyFrameObject *new_frame = NULL;
-
-    PyObject *res = run_and_cleanup_frame(new_frame);
-    Py_DECREF(copy_code_obj);
-    Py_DECREF(LocalCopy);
-    Py_DECREF(FrameLocals);
-
-    return res;
-}
-
 // static PyObject *_copy_run_frame_from_capsule(PyObject *capsule) {
 //     if (PyErr_Occurred()) {
 //         PyErr_Print();
@@ -1112,7 +1085,6 @@ static PyObject *resume_greenlet(PyObject *self, PyObject *args) {
 }
 
 static PyMethodDef MyMethods[] = {
-    {"copy_and_run_frame", copy_and_run_frame, METH_VARARGS, "Copy the current frame and run it"},
     {"serialize_frame", (PyCFunction) serialize_frame, METH_VARARGS | METH_KEYWORDS, "Serialize the frame"},
     {"copy_frame", (PyCFunction) copy_frame, METH_VARARGS | METH_KEYWORDS, "Copy a given frame"},
     {"copy_current_frame", (PyCFunction) copy_current_frame, METH_VARARGS | METH_KEYWORDS, "Copy the current frame"},
