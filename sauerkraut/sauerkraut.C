@@ -226,6 +226,7 @@ typedef struct frame_copy_capsule {
     ~frame_copy_capsule() {
         if (frame) {
             if (owns_interpreter_frame && frame->f_frame) {
+                Py_XDECREF((PyObject*)frame->f_frame->f_executable.bits);
                 free(frame->f_frame);
                 frame->f_frame = NULL;
             }
@@ -793,7 +794,7 @@ static void init_pyinterpreterframe(sauerkraut::PyInterpreterFrame *interp_frame
     interp_frame->f_locals = NULL;
     interp_frame->previous = NULL;
 
-    interp_frame->f_executable.bits = (uintptr_t)code.borrow();
+    interp_frame->f_executable.bits = (uintptr_t)Py_NewRef(code.borrow());
     if(frame_obj.f_executable.immutables_included()) {
         interp_frame->f_funcobj = Py_NewRef(frame_obj.f_funcobj.value().borrow());
         if(NULL != frame_obj.f_globals) {
