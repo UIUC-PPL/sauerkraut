@@ -1,4 +1,5 @@
 import sauerkraut as skt
+from sauerkraut import liveness
 import greenlet
 import numpy as np
 calls = 0
@@ -271,8 +272,6 @@ def test_resume_greenlet():
     print("Test 'resume_greenlet' passed")
 
 def test_liveness_basic():
-    from sauerkraut import liveness
-
     def sample_fn():
         a = 1
         b = 2
@@ -292,8 +291,6 @@ def test_liveness_basic():
 
 
 def test_liveness_dead_variables():
-    from sauerkraut import liveness
-
     def fn_with_dead():
         x = 1
         y = 2
@@ -309,8 +306,6 @@ def test_liveness_dead_variables():
 
 
 def test_liveness_module_function():
-    from sauerkraut import liveness
-
     def cached_fn():
         a = 10
         b = 20
@@ -326,8 +321,6 @@ def test_liveness_module_function():
 
 
 def test_liveness_invalid_offset():
-    from sauerkraut import liveness
-
     def simple_fn():
         return 1
 
@@ -341,8 +334,6 @@ def test_liveness_invalid_offset():
 
 
 def test_liveness_loop():
-    from sauerkraut import liveness
-
     def loop_fn():
         total = 0
         for i in range(5):
