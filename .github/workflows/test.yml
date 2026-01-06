@@ -16,6 +16,7 @@ jobs:
   test-linux:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ['3.13', '3.14']
     steps:
@@ -42,6 +43,7 @@ jobs:
   test-macos:
     runs-on: macos-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ['3.13', '3.14']
     steps:
