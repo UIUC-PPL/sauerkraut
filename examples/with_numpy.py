@@ -1,7 +1,8 @@
 import sauerkraut
-import sys
 import numpy as np
+
 calls = 0
+
 
 def fun1(c):
     global calls
@@ -17,7 +18,7 @@ def fun1(c):
         hidden_inner = 55
         return frame_bytes
     else:
-        print(f'local_array=\n{local_array}')
+        print(f"local_array=\n{local_array}")
         assert np.all(local_array == 1)
 
     calls = 0
@@ -25,10 +26,10 @@ def fun1(c):
 
 
 frame_bytes = fun1(13)
-with open('serialized_frame.bin', 'wb') as f:
+with open("serialized_frame.bin", "wb") as f:
     f.write(frame_bytes)
-with open('serialized_frame.bin', 'rb') as f:
+with open("serialized_frame.bin", "rb") as f:
     read_frame = f.read()
 retval = sauerkraut.deserialize_frame(read_frame, run=True)
 
-print('Function returned with:', retval)
+print("Function returned with:", retval)

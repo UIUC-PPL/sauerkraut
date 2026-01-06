@@ -1,5 +1,5 @@
 import sauerkraut
-import sys
+
 calls = 0
 
 """
@@ -16,6 +16,7 @@ If run is set to False (the default), the frame will be allocated on the regular
 Before it can be run, it must be copied to the frame stack. This is done by calling sauerkraut.run_frame.
 """
 
+
 def fun1(c):
     global calls
     calls += 1
@@ -27,17 +28,17 @@ def fun1(c):
         hidden_inner = 55
         return frame_bytes
     else:
-        print(f'calls={calls}, c={c}, g={g}')
+        print(f"calls={calls}, c={c}, g={g}")
 
     calls = 0
     return 3
 
 
 frame_bytes = fun1(13)
-with open('serialized_frame.bin', 'wb') as f:
+with open("serialized_frame.bin", "wb") as f:
     f.write(frame_bytes)
-with open('serialized_frame.bin', 'rb') as f:
+with open("serialized_frame.bin", "rb") as f:
     read_frame = f.read()
 retval = sauerkraut.deserialize_frame(read_frame, run=True)
 
-print('Function returned with:', retval)
+print("Function returned with:", retval)

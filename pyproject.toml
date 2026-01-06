@@ -35,3 +35,14 @@ dependencies = [
 Homepage = "https://github.com/UIUC-PPL/sauerkraut"
 Repository = "https://github.com/UIUC-PPL/sauerkraut"
 Issues = "https://github.com/UIUC-PPL/sauerkraut/issues"
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+exclude = ["test/test.py", "examples/"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+
+[tool.ruff.format]
+quote-style = "double"
