@@ -223,7 +223,6 @@ setup(
     zip_safe=False,
     python_requires='>=3.13',
     install_requires=[
-        'greenlet',
         'bytecode',
         'numpy'
     ]

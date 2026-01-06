@@ -38,24 +38,6 @@ add_subdirectory(serdes)
 add_subdirectory(greenlet_compat)
 add_dependencies(sauerkraut generate_flatbuffers serdes greenlet_compat)
 
-# Find greenlet library path automatically
-execute_process(
-    COMMAND ${Python_EXECUTABLE} -c "import greenlet, os; base_dir = os.path.dirname(greenlet.__file__); print(base_dir); print([f for f in os.listdir(base_dir) if f.startswith('_greenlet.cpython-')][0])"
-    OUTPUT_VARIABLE PYTHON_INFO
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
-# Split the output into lines
-string(REPLACE "\n" ";" PYTHON_INFO_LIST "${PYTHON_INFO}")
-list(GET PYTHON_INFO_LIST 0 GREENLET_DIR)
-list(GET PYTHON_INFO_LIST 1 GREENLET_FILENAME)
-
-set(GREENLET_LIBRARY "${GREENLET_DIR}/${GREENLET_FILENAME}")
-
-if(NOT EXISTS ${GREENLET_LIBRARY})
-    message(FATAL_ERROR "Greenlet library not found at ${GREENLET_LIBRARY}")
-endif()
-
 # Link necessary libraries
 if(APPLE)
     # On macOS, don't link directly to Python library - use dynamic_lookup instead
@@ -76,7 +58,6 @@ else()
         m
         util
         dl
-        "-Wl,--no-as-needed,${GREENLET_LIBRARY}"
     )
 endif()
 
