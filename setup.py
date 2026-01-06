@@ -123,14 +123,36 @@ class CMakeBuild(build_ext):
         subprocess.check_call(['cmake', ext.sourcedir] + cmake_args, cwd=build_temp)
         subprocess.check_call(['cmake', '--build', '.'] + build_args, cwd=build_temp)
         
-        built_libs = ['_sauerkraut.so', 'greenlet_compat.so', 'serdes.so']
+        # Determine library extension based on platform
+        if sys.platform == 'darwin':
+            # Main module is built as MODULE (.so bundle), helper libs as SHARED (.dylib)
+            main_ext = '.so'  # CMake MODULE produces .so on macOS
+            helper_ext = '.dylib'
+            target_ext = '.so'
+        elif sys.platform == 'win32':
+            main_ext = '.pyd'
+            helper_ext = '.pyd'
+            target_ext = '.pyd'
+        else:
+            main_ext = '.so'
+            helper_ext = '.so'
+            target_ext = '.so'
+
         package_dir = os.path.join(install_dir, 'sauerkraut')
         os.makedirs(package_dir, exist_ok=True)
-        
-        for lib in built_libs:
-            src = os.path.join(build_temp, lib)
+
+        # Copy main module
+        main_src = os.path.join(build_temp, f'_sauerkraut{main_ext}')
+        if os.path.exists(main_src):
+            dst = os.path.join(package_dir, f'_sauerkraut{target_ext}')
+            self.copy_file(main_src, dst)
+
+        # Copy helper libraries
+        for lib_name in ['greenlet_compat', 'serdes']:
+            src = os.path.join(build_temp, f'{lib_name}{helper_ext}')
             if os.path.exists(src):
-                dst = os.path.join(package_dir, lib)
+                target_name = f'{lib_name}{target_ext}'
+                dst = os.path.join(package_dir, target_name)
                 self.copy_file(src, dst)
 
     def _get_python_library(self):

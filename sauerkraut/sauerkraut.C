@@ -998,12 +998,17 @@ static PyObject *copy_frame_from_greenlet(PyObject *self, PyObject *args, PyObje
     }
 
     assert(greenlet::is_greenlet(greenlet));
-    auto frame = make_weakref(greenlet::getframe(greenlet));
-    
-    if (options.serialize) {
-        return _copy_serialize_frame_object(frame, options);
+    auto frame = py_strongref<PyFrameObject>::steal(greenlet::getframe(greenlet));
+    if (!frame) {
+        PyErr_SetString(PyExc_ValueError, "Greenlet has no active frame");
+        return NULL;
     }
-    return _copy_frame_object(frame, options);
+    py_weakref<PyFrameObject> frame_ref(frame.borrow());
+
+    if (options.serialize) {
+        return _copy_serialize_frame_object(frame_ref, options);
+    }
+    return _copy_frame_object(frame_ref, options);
 }
 
 static PyObject *_resume_greenlet(py_weakref<PyFrameObject> frame) {
