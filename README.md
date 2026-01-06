@@ -101,20 +101,18 @@ skt.run_frame(code)
 
 ## Installation
 
-Sauerkraut can be installed in two ways:
-
-### 1. Direct Installation
-First, install the required packages:
+### From PyPI (Recommended)
 ```bash
-python3 -m pip install -r requirements.txt
+pip install sauerkraut
 ```
 
-Then install sauerkraut:
+### From Source
 ```bash
+python3 -m pip install -r requirements.txt
 python3 -m pip install .
 ```
 
-### 2. Using Docker
+### Using Docker
 ```bash
 # Build the Docker image (takes 5-10 minutes)
 docker build -t sauerkraut -f Dockerfile .
