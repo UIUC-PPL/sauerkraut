@@ -22,10 +22,9 @@ RUN conda init bash && \
     echo "conda activate sauerkraut" >> ~/.bashrc
 # Make the conda environment available in PATH
 ENV PATH=/opt/conda/envs/sauerkraut/bin:$PATH
-# Install sauerkraut
-RUN \
-    git clone https://github.com/ZwFink/sauerkraut.git /sauerkraut \
-    && cd /sauerkraut && python3 -m pip install -r requirements.txt \
+# Copy and install sauerkraut from local checkout
+COPY . /sauerkraut
+RUN cd /sauerkraut && python3 -m pip install -r requirements.txt \
     && python3 -m pip install .
 # Create entrypoint script
 RUN echo '#!/bin/bash\n\
