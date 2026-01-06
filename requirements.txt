@@ -1,4 +1,4 @@
-git+https://github.com/ZwFink/greenlet.git#egg=greenlet
+greenlet
 git+https://github.com/ZwFink/bytecode.git#egg=bytecode
 numpy
 dill

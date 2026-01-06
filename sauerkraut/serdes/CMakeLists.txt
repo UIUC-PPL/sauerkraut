@@ -15,4 +15,5 @@ set_target_properties(serdes PROPERTIES
 add_dependencies(serdes generate_flatbuffers)
 target_include_directories(serdes PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    )
+    ${CMAKE_BINARY_DIR}/sauerkraut/buffer  # For generated flatbuffers headers
+)

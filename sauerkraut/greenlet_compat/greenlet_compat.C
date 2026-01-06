@@ -1,18 +1,39 @@
 #include "greenlet_compat.h"
-#include <greenlet.h>
 
-struct _greenlet;
-PyObject* green_getframe(struct _greenlet* self, void* context);
+static PyObject* greenlet_type = NULL;
 
 namespace greenlet {
     bool is_greenlet(PyObject *obj) {
-        return PyGreenlet_Check(obj) != 0;
+        if (greenlet_type == NULL) {
+            return false;
+        }
+        return PyObject_IsInstance(obj, greenlet_type) == 1;
     }
-    PyFrameObject* getframe(PyObject* self) {   
-        return (PyFrameObject*)green_getframe((struct _greenlet*)self, NULL);
+
+    PyFrameObject* getframe(PyObject* self) {
+        PyObject* frame = PyObject_GetAttrString(self, "gr_frame");
+        if (frame == NULL) {
+            return NULL;
+        }
+        if (frame == Py_None) {
+            Py_DECREF(frame);
+            return NULL;
+        }
+        return (PyFrameObject*)frame;
     }
 
     void init_greenlet() {
-        PyGreenlet_Import();
+        // Import greenlet module and cache the greenlet type
+        PyObject* greenlet_module = PyImport_ImportModule("greenlet");
+        if (greenlet_module == NULL) {
+            PyErr_Print();
+            return;
+        }
+        greenlet_type = PyObject_GetAttrString(greenlet_module, "greenlet");
+        Py_DECREF(greenlet_module);
+        if (greenlet_type == NULL) {
+            PyErr_Print();
+        }
     }
 }
+
