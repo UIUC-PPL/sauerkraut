@@ -997,38 +997,26 @@ static PyObject *deserialize_frame(PyObject *self, PyObject *args, PyObject *kwa
     }
 }
 
-// push_frame_for_running shallow-copies refs to stack frame, so just free heap memory
-static void cleanup_heap_interpreter_frame(frame_copy_capsule *capsule) {
-    if (capsule && capsule->owns_interpreter_frame && capsule->frame && capsule->frame->f_frame) {
-        free(capsule->frame->f_frame);
-        capsule->frame->f_frame = NULL;
-        capsule->owns_interpreter_frame = false;
-    }
-}
-
-// Accepts PyCapsule (from deserialize_frame) or raw PyFrameObject* for backward compat
 static PyObject *run_frame(PyObject *self, PyObject *args, PyObject *kwargs) {
-    PyObject *frame_or_capsule = NULL;
+    PyObject *capsule_obj = NULL;
     PyObject *replace_locals = NULL;
     static char *kwlist[] = {"frame", "replace_locals", NULL};
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, &frame_or_capsule, &replace_locals)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, &capsule_obj, &replace_locals)) {
         return NULL;
     }
 
-    PyFrameObject *frame = NULL;
-    frame_copy_capsule *capsule = NULL;
-
-    if (PyCapsule_CheckExact(frame_or_capsule)) {
-        capsule = (struct frame_copy_capsule *)PyCapsule_GetPointer(frame_or_capsule, copy_frame_capsule_name);
-        if (capsule == NULL) {
-            return NULL;
-        }
-        frame = capsule->frame;
-    } else {
-        frame = (PyFrameObject*)frame_or_capsule;
+    if (!PyCapsule_CheckExact(capsule_obj)) {
+        PyErr_SetString(PyExc_TypeError, "frame must be a capsule from copy_frame or deserialize_frame");
+        return NULL;
     }
 
+    frame_copy_capsule *capsule = (struct frame_copy_capsule *)PyCapsule_GetPointer(capsule_obj, copy_frame_capsule_name);
+    if (capsule == NULL) {
+        return NULL;
+    }
+
+    PyFrameObject *frame = capsule->frame;
     py_weakref<PyFrameObject> frame_ref = frame;
 
     if (!handle_replace_locals(replace_locals, frame_ref)) {
@@ -1036,12 +1024,12 @@ static PyObject *run_frame(PyObject *self, PyObject *args, PyObject *kwargs) {
     }
 
     // Save before run_frame_direct replaces f_frame with stack-allocated frame
-    _PyInterpreterFrame *heap_interp_frame = capsule ? frame->f_frame : NULL;
+    _PyInterpreterFrame *heap_interp_frame = frame->f_frame;
 
     PyObject *result = run_frame_direct(frame_ref);
 
     // Refs were shallow-copied to stack frame, so just free heap memory
-    if (capsule && heap_interp_frame) {
+    if (capsule->owns_interpreter_frame && heap_interp_frame) {
         free(heap_interp_frame);
         capsule->owns_interpreter_frame = false;
     }
