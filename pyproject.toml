@@ -27,8 +27,10 @@ classifiers = [
     "Topic :: System :: Distributed Computing",
 ]
 dependencies = [
-    "bytecode",
+    "bytecode @ git+https://github.com/ZwFink/bytecode.git",
     "numpy",
+    "greenlet",
+    "dill",
 ]
 
 [project.urls]
