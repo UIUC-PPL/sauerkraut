@@ -217,17 +217,52 @@ PyObject *deepcopy_object(py_weakref<PyObject> obj) {
     return copy_obj;
 }
 
+static void cleanup_interpreter_frame(_PyInterpreterFrame *interp, int nlocalsplus, int stack_depth) {
+    Py_XDECREF((PyObject*)interp->f_executable.bits);
+    Py_XDECREF(interp->f_funcobj);
+    Py_XDECREF(interp->f_locals);
+
+    for (int i = 0; i < nlocalsplus; i++) {
+        Py_XDECREF((PyObject*)interp->localsplus[i].bits);
+    }
+
+    _PyStackRef *stack_base = interp->localsplus + nlocalsplus;
+    for (int i = 0; i < stack_depth; i++) {
+        Py_XDECREF((PyObject*)stack_base[i].bits);
+    }
+
+    free(interp);
+}
+
 typedef struct frame_copy_capsule {
     // Strong reference
     PyFrameObject *frame;
     utils::py::StackState stack_state;
     bool owns_interpreter_frame;
+    int nlocalsplus;   // For cleanup iteration
+    int stack_depth;   // For stack cleanup
 
     ~frame_copy_capsule() {
         if (frame) {
             if (owns_interpreter_frame && frame->f_frame) {
-                Py_XDECREF((PyObject*)frame->f_frame->f_executable.bits);
-                free(frame->f_frame);
+                auto *interp = frame->f_frame;
+
+                Py_XDECREF((PyObject*)interp->f_executable.bits);
+                Py_XDECREF(interp->f_funcobj);
+                Py_XDECREF(interp->f_locals);
+
+                for (int i = 0; i < nlocalsplus; i++) {
+                    Py_XDECREF((PyObject*)interp->localsplus[i].bits);
+                }
+
+                _PyStackRef *stack_base = interp->localsplus + nlocalsplus;
+                for (int i = 0; i < stack_depth; i++) {
+                    Py_XDECREF((PyObject*)stack_base[i].bits);
+                }
+
+                // f_globals, f_builtins are borrowed refs; frame_obj is weak (no Py_NewRef)
+
+                free(interp);
                 frame->f_frame = NULL;
             }
             Py_XDECREF(frame);
@@ -242,16 +277,18 @@ void frame_copy_capsule_destroy(PyObject *capsule) {
     delete copy_capsule;
 }
 
-frame_copy_capsule *frame_copy_capsule_create_direct(py_weakref<PyFrameObject> frame, utils::py::StackState stack_state, bool owns_interpreter_frame = false) {
+frame_copy_capsule *frame_copy_capsule_create_direct(py_weakref<PyFrameObject> frame, utils::py::StackState stack_state, bool owns_interpreter_frame = false, int nlocalsplus = 0, int stack_depth = 0) {
     struct frame_copy_capsule *copy_capsule = new struct frame_copy_capsule;
     copy_capsule->frame = (PyFrameObject*)Py_NewRef(*frame);
     copy_capsule->stack_state = stack_state;
     copy_capsule->owns_interpreter_frame = owns_interpreter_frame;
+    copy_capsule->nlocalsplus = nlocalsplus;
+    copy_capsule->stack_depth = stack_depth;
     return copy_capsule;
 }
 
-PyObject *frame_copy_capsule_create(py_weakref<PyFrameObject> frame, utils::py::StackState stack_state, bool owns_interpreter_frame = false) {
-    auto *copy_capsule = frame_copy_capsule_create_direct(frame, stack_state, owns_interpreter_frame);
+PyObject *frame_copy_capsule_create(py_weakref<PyFrameObject> frame, utils::py::StackState stack_state, bool owns_interpreter_frame = false, int nlocalsplus = 0, int stack_depth = 0) {
+    auto *copy_capsule = frame_copy_capsule_create_direct(frame, stack_state, owns_interpreter_frame, nlocalsplus, stack_depth);
     return PyCapsule_New(copy_capsule, copy_frame_capsule_name, frame_copy_capsule_destroy);
 }
 
@@ -462,6 +499,7 @@ static PyObject *_copy_frame_object(py_weakref<PyFrameObject> frame, const Seria
     PyFrameObject *new_frame = create_copied_frame(tstate, to_copy, copy_code_obj, LocalCopy, 0, 1, 0, stack_state.size(), 1);
 
     PyObject *capsule = frame_copy_capsule_create(new_frame, stack_state, true);
+    Py_DECREF(new_frame);  // Drop our ref; capsule holds its own
     Py_DECREF(copy_code_obj);
     Py_DECREF(LocalCopy);
     Py_DECREF(FrameLocals);
@@ -541,6 +579,9 @@ static bool parse_serialization_options(PyObject* args, PyObject* kwargs, Serial
 static PyObject *run_and_cleanup_frame(PyFrameObject *frame) {
     PyObject *res = PyEval_EvalFrame(frame);
     PyCodeObject *code = PyFrame_GetCode(frame);
+
+    // Clear f_frame before it becomes a dangling pointer
+    frame->f_frame = NULL;
 
     Py_SET_REFCNT(code, 0);
     Py_SET_REFCNT(frame, 0);
@@ -785,8 +826,16 @@ static PyFrameObject *create_pyframe_object(serdes::DeserializedPyFrame& frame_o
     return frame;
 }
 
-static void init_funcobj_and_globals(sauerkraut::PyInterpreterFrame *interp_frame,
-                                     serdes::DeserializedPyInterpreterFrame& frame_obj) {
+static void init_pyinterpreterframe(sauerkraut::PyInterpreterFrame *interp_frame, 
+                                   serdes::DeserializedPyInterpreterFrame& frame_obj,
+                                   py_weakref<PyFrameObject> frame,
+                                   py_weakref<PyCodeObject> code) {
+    interp_frame->f_globals = NULL;
+    interp_frame->f_builtins = NULL;
+    interp_frame->f_locals = NULL;
+    interp_frame->previous = NULL;
+
+    interp_frame->f_executable.bits = (uintptr_t)Py_NewRef(code.borrow());
     if(frame_obj.f_executable.immutables_included()) {
         interp_frame->f_funcobj = Py_NewRef(frame_obj.f_funcobj.value().borrow());
         if(NULL != frame_obj.f_globals) {
@@ -804,24 +853,19 @@ static void init_funcobj_and_globals(sauerkraut::PyInterpreterFrame *interp_fram
             interp_frame->f_globals = NULL;
         }
     }
-}
 
-static void init_builtins_and_locals(sauerkraut::PyInterpreterFrame *interp_frame,
-                                     serdes::DeserializedPyInterpreterFrame& frame_obj) {
     if(NULL != *frame_obj.f_builtins) {
         interp_frame->f_builtins = frame_obj.f_builtins.borrow();
     } else {
         interp_frame->f_builtins = PyEval_GetFrameBuiltins();
     }
-
+    
+    // These are NOT fast locals, those come from localsplus
     if(NULL != *frame_obj.f_locals) {
         interp_frame->f_locals = Py_NewRef(frame_obj.f_locals.borrow());
     }
-}
 
-static void init_localsplus_and_stack(sauerkraut::PyInterpreterFrame *interp_frame,
-                                      serdes::DeserializedPyInterpreterFrame& frame_obj,
-                                      py_weakref<PyCodeObject> code) {
+    // Here are the locals plus
     auto localsplus = frame_obj.localsplus;
     for(size_t i = 0; i < localsplus.size(); i++) {
         interp_frame->localsplus[i].bits = (intptr_t) Py_NewRef(localsplus[i].borrow());
@@ -834,36 +878,19 @@ static void init_localsplus_and_stack(sauerkraut::PyInterpreterFrame *interp_fra
     for(size_t i = localsplus.size(); i < (size_t)code->co_nlocalsplus; i++) {
         interp_frame->localsplus[i].bits = 0;
     }
-}
-
-static void init_pyinterpreterframe(sauerkraut::PyInterpreterFrame *interp_frame,
-                                   serdes::DeserializedPyInterpreterFrame& frame_obj,
-                                   py_weakref<PyFrameObject> frame,
-                                   py_weakref<PyCodeObject> code) {
-    interp_frame->f_globals = NULL;
-    interp_frame->f_builtins = NULL;
-    interp_frame->f_locals = NULL;
-    interp_frame->previous = NULL;
-
-    interp_frame->f_executable.bits = (uintptr_t)Py_NewRef(code.borrow());
-
-    init_funcobj_and_globals(interp_frame, frame_obj);
-    init_builtins_and_locals(interp_frame, frame_obj);
-    init_localsplus_and_stack(interp_frame, frame_obj, code);
-
-    auto stack = frame_obj.stack;
-    _PyStackRef *frame_stack_base = utils::py::get_stack_base(interp_frame);
-
-    interp_frame->instr_ptr = (sauerkraut::PyBitcodeInstruction*)
-        (utils::py::get_code_adaptive(code) + frame_obj.instr_offset/2);
+    interp_frame->instr_ptr = (sauerkraut::PyBitcodeInstruction*) 
+        (utils::py::get_code_adaptive(code) + frame_obj.instr_offset/2);//utils::py::get_offset_for_skipping_call();
     interp_frame->return_offset = frame_obj.return_offset;
     #if SAUERKRAUT_PY314
     interp_frame->stackpointer = frame_stack_base + stack.size();
     #elif SAUERKRAUT_PY313
     interp_frame->stacktop = code->co_nlocalsplus + stack.size();
     #endif
+    // TODO: Check what happens when we make the owner the frame object instead of the thread.
+    // Might allow us to skip a copy when calling this frame
     interp_frame->owner = frame_obj.owner;
-    interp_frame->frame_obj = (PyFrameObject*) Py_NewRef(frame.borrow());
+    // Weak ref to avoid circular reference with capsule
+    interp_frame->frame_obj = *frame;
     frame->f_frame = interp_frame;
 }
 
@@ -916,7 +943,17 @@ static PyObject *_deserialize_frame(PyObject *bytes, bool inplace=false) {
     PyFrameObject *frame = create_pyframe_object(deserframe, code.borrow());
     create_pyinterpreterframe_object(deserframe.f_frame, frame, code.borrow(), inplace);
 
-    return (PyObject*) frame;
+    if (inplace) {
+        return (PyObject*) frame;
+    } else {
+        // Wrap in capsule for proper cleanup of heap-allocated interpreter frame
+        int nlocalsplus = code->co_nlocalsplus;
+        int stack_depth = deserframe.f_frame.stack.size();
+        utils::py::StackState stack_state;
+        PyObject *capsule = frame_copy_capsule_create(frame, stack_state, true, nlocalsplus, stack_depth);
+        Py_DECREF(frame);  // Drop our ref; capsule holds its own
+        return capsule;
+    }
 }
 
 static PyObject *run_frame_direct(py_weakref<PyFrameObject> frame) {
@@ -944,36 +981,72 @@ static PyObject *deserialize_frame(PyObject *self, PyObject *args, PyObject *kwa
     }
 
     PyObject *deser_result = _deserialize_frame(bytes, run);
-    PyObject *ret_obj = deser_result;
-
-    if (!handle_replace_locals(replace_locals, (PyFrameObject*)deser_result)) {
+    if (deser_result == NULL) {
         return NULL;
     }
 
-    if(run) {
-        ret_obj = run_and_cleanup_frame((PyFrameObject*)deser_result);
+    if (run) {
+        PyFrameObject *frame = (PyFrameObject*)deser_result;
+        if (!handle_replace_locals(replace_locals, frame)) {
+            return NULL;
+        }
+        return run_and_cleanup_frame(frame);
+    } else {
+        // replace_locals should be applied via run_frame
+        return deser_result;
     }
-
-    return ret_obj;
 }
 
-// First allocates frame on the frame stack, then runs it
+// push_frame_for_running shallow-copies refs to stack frame, so just free heap memory
+static void cleanup_heap_interpreter_frame(frame_copy_capsule *capsule) {
+    if (capsule && capsule->owns_interpreter_frame && capsule->frame && capsule->frame->f_frame) {
+        free(capsule->frame->f_frame);
+        capsule->frame->f_frame = NULL;
+        capsule->owns_interpreter_frame = false;
+    }
+}
+
+// Accepts PyCapsule (from deserialize_frame) or raw PyFrameObject* for backward compat
 static PyObject *run_frame(PyObject *self, PyObject *args, PyObject *kwargs) {
-    PyFrameObject *frame = NULL;
+    PyObject *frame_or_capsule = NULL;
     PyObject *replace_locals = NULL;
     static char *kwlist[] = {"frame", "replace_locals", NULL};
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, &frame, &replace_locals)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, &frame_or_capsule, &replace_locals)) {
         return NULL;
     }
 
+    PyFrameObject *frame = NULL;
+    frame_copy_capsule *capsule = NULL;
+
+    if (PyCapsule_CheckExact(frame_or_capsule)) {
+        capsule = (struct frame_copy_capsule *)PyCapsule_GetPointer(frame_or_capsule, copy_frame_capsule_name);
+        if (capsule == NULL) {
+            return NULL;
+        }
+        frame = capsule->frame;
+    } else {
+        frame = (PyFrameObject*)frame_or_capsule;
+    }
+
     py_weakref<PyFrameObject> frame_ref = frame;
-    
+
     if (!handle_replace_locals(replace_locals, frame_ref)) {
         return NULL;
     }
 
-    return run_frame_direct(frame_ref);
+    // Save before run_frame_direct replaces f_frame with stack-allocated frame
+    _PyInterpreterFrame *heap_interp_frame = capsule ? frame->f_frame : NULL;
+
+    PyObject *result = run_frame_direct(frame_ref);
+
+    // Refs were shallow-copied to stack frame, so just free heap memory
+    if (capsule && heap_interp_frame) {
+        free(heap_interp_frame);
+        capsule->owns_interpreter_frame = false;
+    }
+
+    return result;
 }
 
 static PyObject *serialize_frame(PyObject *self, PyObject *args, PyObject *kwargs) {
