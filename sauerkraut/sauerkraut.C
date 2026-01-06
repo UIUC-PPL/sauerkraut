@@ -785,16 +785,8 @@ static PyFrameObject *create_pyframe_object(serdes::DeserializedPyFrame& frame_o
     return frame;
 }
 
-static void init_pyinterpreterframe(sauerkraut::PyInterpreterFrame *interp_frame, 
-                                   serdes::DeserializedPyInterpreterFrame& frame_obj,
-                                   py_weakref<PyFrameObject> frame,
-                                   py_weakref<PyCodeObject> code) {
-    interp_frame->f_globals = NULL;
-    interp_frame->f_builtins = NULL;
-    interp_frame->f_locals = NULL;
-    interp_frame->previous = NULL;
-
-    interp_frame->f_executable.bits = (uintptr_t)Py_NewRef(code.borrow());
+static void init_funcobj_and_globals(sauerkraut::PyInterpreterFrame *interp_frame,
+                                     serdes::DeserializedPyInterpreterFrame& frame_obj) {
     if(frame_obj.f_executable.immutables_included()) {
         interp_frame->f_funcobj = Py_NewRef(frame_obj.f_funcobj.value().borrow());
         if(NULL != frame_obj.f_globals) {
@@ -812,19 +804,24 @@ static void init_pyinterpreterframe(sauerkraut::PyInterpreterFrame *interp_frame
             interp_frame->f_globals = NULL;
         }
     }
+}
 
+static void init_builtins_and_locals(sauerkraut::PyInterpreterFrame *interp_frame,
+                                     serdes::DeserializedPyInterpreterFrame& frame_obj) {
     if(NULL != *frame_obj.f_builtins) {
         interp_frame->f_builtins = frame_obj.f_builtins.borrow();
     } else {
         interp_frame->f_builtins = PyEval_GetFrameBuiltins();
     }
-    
-    // These are NOT fast locals, those come from localsplus
+
     if(NULL != *frame_obj.f_locals) {
         interp_frame->f_locals = Py_NewRef(frame_obj.f_locals.borrow());
     }
+}
 
-    // Here are the locals plus
+static void init_localsplus_and_stack(sauerkraut::PyInterpreterFrame *interp_frame,
+                                      serdes::DeserializedPyInterpreterFrame& frame_obj,
+                                      py_weakref<PyCodeObject> code) {
     auto localsplus = frame_obj.localsplus;
     for(size_t i = 0; i < localsplus.size(); i++) {
         interp_frame->localsplus[i].bits = (intptr_t) Py_NewRef(localsplus[i].borrow());
@@ -837,16 +834,34 @@ static void init_pyinterpreterframe(sauerkraut::PyInterpreterFrame *interp_frame
     for(size_t i = localsplus.size(); i < (size_t)code->co_nlocalsplus; i++) {
         interp_frame->localsplus[i].bits = 0;
     }
-    interp_frame->instr_ptr = (sauerkraut::PyBitcodeInstruction*) 
-        (utils::py::get_code_adaptive(code) + frame_obj.instr_offset/2);//utils::py::get_offset_for_skipping_call();
+}
+
+static void init_pyinterpreterframe(sauerkraut::PyInterpreterFrame *interp_frame,
+                                   serdes::DeserializedPyInterpreterFrame& frame_obj,
+                                   py_weakref<PyFrameObject> frame,
+                                   py_weakref<PyCodeObject> code) {
+    interp_frame->f_globals = NULL;
+    interp_frame->f_builtins = NULL;
+    interp_frame->f_locals = NULL;
+    interp_frame->previous = NULL;
+
+    interp_frame->f_executable.bits = (uintptr_t)Py_NewRef(code.borrow());
+
+    init_funcobj_and_globals(interp_frame, frame_obj);
+    init_builtins_and_locals(interp_frame, frame_obj);
+    init_localsplus_and_stack(interp_frame, frame_obj, code);
+
+    auto stack = frame_obj.stack;
+    _PyStackRef *frame_stack_base = utils::py::get_stack_base(interp_frame);
+
+    interp_frame->instr_ptr = (sauerkraut::PyBitcodeInstruction*)
+        (utils::py::get_code_adaptive(code) + frame_obj.instr_offset/2);
     interp_frame->return_offset = frame_obj.return_offset;
     #if SAUERKRAUT_PY314
     interp_frame->stackpointer = frame_stack_base + stack.size();
     #elif SAUERKRAUT_PY313
     interp_frame->stacktop = code->co_nlocalsplus + stack.size();
     #endif
-    // TODO: Check what happens when we make the owner the frame object instead of the thread.
-    // Might allow us to skip a copy when calling this frame
     interp_frame->owner = frame_obj.owner;
     interp_frame->frame_obj = (PyFrameObject*) Py_NewRef(frame.borrow());
     frame->f_frame = interp_frame;
