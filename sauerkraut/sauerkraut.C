@@ -221,25 +221,36 @@ typedef struct frame_copy_capsule {
     // Strong reference
     PyFrameObject *frame;
     utils::py::StackState stack_state;
+    bool owns_interpreter_frame;
+
+    ~frame_copy_capsule() {
+        if (frame) {
+            if (owns_interpreter_frame && frame->f_frame) {
+                free(frame->f_frame);
+                frame->f_frame = NULL;
+            }
+            Py_XDECREF(frame);
+        }
+    }
 } frame_copy_capsule;
 
 static char copy_frame_capsule_name[] = "Frame Capsule Object";
 
 void frame_copy_capsule_destroy(PyObject *capsule) {
     struct frame_copy_capsule *copy_capsule = (struct frame_copy_capsule *)PyCapsule_GetPointer(capsule, copy_frame_capsule_name);
-    Py_DECREF(copy_capsule->frame);
-    free(copy_capsule);
+    delete copy_capsule;
 }
 
-frame_copy_capsule *frame_copy_capsule_create_direct(py_weakref<PyFrameObject> frame, utils::py::StackState stack_state) {
+frame_copy_capsule *frame_copy_capsule_create_direct(py_weakref<PyFrameObject> frame, utils::py::StackState stack_state, bool owns_interpreter_frame = false) {
     struct frame_copy_capsule *copy_capsule = new struct frame_copy_capsule;
     copy_capsule->frame = (PyFrameObject*)Py_NewRef(*frame);
     copy_capsule->stack_state = stack_state;
+    copy_capsule->owns_interpreter_frame = owns_interpreter_frame;
     return copy_capsule;
 }
 
-PyObject *frame_copy_capsule_create(py_weakref<PyFrameObject> frame, utils::py::StackState stack_state) {
-    auto *copy_capsule = frame_copy_capsule_create_direct(frame, stack_state);
+PyObject *frame_copy_capsule_create(py_weakref<PyFrameObject> frame, utils::py::StackState stack_state, bool owns_interpreter_frame = false) {
+    auto *copy_capsule = frame_copy_capsule_create_direct(frame, stack_state, owns_interpreter_frame);
     return PyCapsule_New(copy_capsule, copy_frame_capsule_name, frame_copy_capsule_destroy);
 }
 
@@ -449,7 +460,7 @@ static PyObject *_copy_frame_object(py_weakref<PyFrameObject> frame, const Seria
     auto stack_state = utils::py::get_stack_state((PyObject*)*frame);
     PyFrameObject *new_frame = create_copied_frame(tstate, to_copy, copy_code_obj, LocalCopy, 0, 1, 0, stack_state.size(), 1);
 
-    PyObject *capsule = frame_copy_capsule_create(new_frame, stack_state);
+    PyObject *capsule = frame_copy_capsule_create(new_frame, stack_state, true);
     Py_DECREF(copy_code_obj);
     Py_DECREF(LocalCopy);
     Py_DECREF(FrameLocals);
@@ -571,7 +582,8 @@ static PyObject *copy_frame(PyObject *self, PyObject *args, PyObject *kwargs) {
         return NULL;
     }
 
-    py_weakref<PyFrameObject> frame_ref{PyFrame_GetBack((PyFrameObject*)frame)};
+    auto frame_back = py_strongref<PyFrameObject>::steal(PyFrame_GetBack((PyFrameObject*)frame));
+    py_weakref<PyFrameObject> frame_ref{frame_back.borrow()};
 
     if (options.serialize) {
         return _copy_serialize_frame_object(frame_ref, options);
@@ -875,20 +887,18 @@ static PyObject *_deserialize_frame(PyObject *bytes, bool inplace=false) {
 
     // FRAME_OWNED_BY_THREAD
     assert(deserframe.f_frame.owner == 0);
-    PyCodeObject *code = NULL;
+    pycode_strongref code;
     if(deserframe.f_frame.f_executable.immutables_included()) {
-        code = create_pycode_object(deserframe.f_frame.f_executable);
+        code = pycode_strongref::steal(create_pycode_object(deserframe.f_frame.f_executable));
     } else {
         auto cached_invariants = sauerkraut_state->get_code_immutables(deserframe);
         if(cached_invariants) {
-            code = (PyCodeObject*) Py_NewRef(std::get<1>(cached_invariants.value()).borrow());
-        } else {
-            code = NULL;
+            code = make_strongref((PyCodeObject*)std::get<1>(cached_invariants.value()).borrow());
         }
     }
 
-    PyFrameObject *frame = create_pyframe_object(deserframe, code);
-    create_pyinterpreterframe_object(deserframe.f_frame, frame, code, inplace);
+    PyFrameObject *frame = create_pyframe_object(deserframe, code.borrow());
+    create_pyinterpreterframe_object(deserframe.f_frame, frame, code.borrow(), inplace);
 
     return (PyObject*) frame;
 }
