@@ -231,9 +231,143 @@ def test_exclude_locals():
     test_exclude_locals_greenlet()
     test_exclude_locals_current_frame()
 
+def _copy_frame_and_switch():
+    import inspect
+    frame_bytes = skt.copy_frame(inspect.currentframe(), serialize=True)
+    greenlet.getcurrent().parent.switch(frame_bytes)
+
+def copy_frame_target_fn(c):
+    x = 100
+    total = 0
+    for i in range(3):
+        total += i
+        if i == 1:
+            _copy_frame_and_switch()
+    return x + c + total
+
+def test_copy_frame():
+    gr = greenlet.greenlet(copy_frame_target_fn)
+    frame_bytes = gr.switch(50)
+    code = skt.deserialize_frame(frame_bytes)
+    gr2 = greenlet.greenlet(skt.run_frame)
+    result = gr2.switch(code)
+    assert result == 153
+    print("Test 'copy_frame' passed")
+
+def resume_greenlet_fn(c):
+    a = 5
+    greenlet.getcurrent().parent.switch()
+    a += c
+    return a
+
+def test_resume_greenlet():
+    gr = greenlet.greenlet(resume_greenlet_fn)
+    gr.switch(10)
+    serframe = skt.copy_frame_from_greenlet(gr, serialize=True)
+    capsule = skt.deserialize_frame(serframe)
+    gr2 = greenlet.greenlet(skt.run_frame)
+    result = gr2.switch(capsule)
+    assert result == 15
+    print("Test 'resume_greenlet' passed")
+
+def test_liveness_basic():
+    from sauerkraut import liveness
+
+    def sample_fn():
+        a = 1
+        b = 2
+        c = a + b
+        return c
+
+    code = sample_fn.__code__
+    analysis = liveness.LivenessAnalysis(code)
+    offsets = analysis.get_offsets()
+    assert len(offsets) > 0
+
+    for offset in offsets:
+        live = analysis.get_live_variables_at_offset(offset)
+        dead = analysis.get_dead_variables_at_offset(offset)
+        assert len(live & dead) == 0
+    print("Test 'liveness_basic' passed")
+
+
+def test_liveness_dead_variables():
+    from sauerkraut import liveness
+
+    def fn_with_dead():
+        x = 1
+        y = 2
+        z = y + 1
+        return z
+
+    code = fn_with_dead.__code__
+    analysis = liveness.LivenessAnalysis(code)
+    found_x_dead = any('x' in analysis.get_dead_variables_at_offset(o)
+                       for o in analysis.get_offsets())
+    assert found_x_dead
+    print("Test 'liveness_dead_variables' passed")
+
+
+def test_liveness_module_function():
+    from sauerkraut import liveness
+
+    def cached_fn():
+        a = 10
+        b = 20
+        return b
+
+    code = cached_fn.__code__
+    analysis = liveness.LivenessAnalysis(code)
+    offset = analysis.get_offsets()[0]
+    dead1 = liveness.get_dead_variables_at_offset(code, offset)
+    dead2 = liveness.get_dead_variables_at_offset(code, offset)
+    assert dead1 == dead2
+    print("Test 'liveness_module_function' passed")
+
+
+def test_liveness_invalid_offset():
+    from sauerkraut import liveness
+
+    def simple_fn():
+        return 1
+
+    analysis = liveness.LivenessAnalysis(simple_fn.__code__)
+    try:
+        analysis.get_live_variables_at_offset(99999)
+        assert False, "Should raise ValueError"
+    except ValueError:
+        pass
+    print("Test 'liveness_invalid_offset' passed")
+
+
+def test_liveness_loop():
+    from sauerkraut import liveness
+
+    def loop_fn():
+        total = 0
+        for i in range(5):
+            total += i
+        return total
+
+    analysis = liveness.LivenessAnalysis(loop_fn.__code__)
+    offsets = analysis.get_offsets()
+    assert len(offsets) > 0
+    print("Test 'liveness_loop' passed")
+
+
+def test_liveness():
+    test_liveness_basic()
+    test_liveness_dead_variables()
+    test_liveness_module_function()
+    test_liveness_invalid_offset()
+    test_liveness_loop()
+
 test_copy_then_serialize()
 test_combined_copy_serialize()
 test_for_loop()
 test_greenlet()
 test_replace_locals()
 test_exclude_locals()
+test_copy_frame()
+test_resume_greenlet()
+test_liveness()
