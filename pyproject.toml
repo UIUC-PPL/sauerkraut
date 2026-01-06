@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sauerkraut"
+version = "0.1"
+description = "Serialization for Python's Control State"
+readme = "README.md"
+requires-python = ">=3.13"
+authors = [
+    {name = "Zane Fink", email = "zanef2@illinois.edu"}
+]
+dependencies = [
+    "bytecode",
+    "numpy",
+]
