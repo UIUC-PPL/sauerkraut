@@ -1007,7 +1007,7 @@ static PyObject *run_frame(PyObject *self, PyObject *args, PyObject *kwargs) {
     }
 
     if (!PyCapsule_CheckExact(capsule_obj)) {
-        PyErr_SetString(PyExc_TypeError, "frame must be a capsule from copy_frame or deserialize_frame");
+        PyErr_SetString(PyExc_TypeError, "frame must be a capsule from copy_current_frame, copy_frame, or deserialize_frame");
         return NULL;
     }
 
