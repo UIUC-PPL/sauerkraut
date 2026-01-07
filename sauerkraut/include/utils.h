@@ -217,7 +217,7 @@ namespace utils {
        }
 
        int get_iframe_localsplus_size(sauerkraut::PyInterpreterFrame *iframe) {
-           PyCodeObject *code = (PyCodeObject*) iframe->f_executable.bits;
+           PyCodeObject *code = (PyCodeObject*) PyStackRef_AsPyObjectBorrow(iframe->f_executable);
            if(NULL == code) {
                return 0;
            }
@@ -250,7 +250,7 @@ namespace utils {
 
         template <Units Unit>
         Py_ssize_t get_instr_offset(py_weakref<sauerkraut::PyInterpreterFrame> iframe) {
-            PyCodeObject *code = (PyCodeObject*) iframe->f_executable.bits;
+            PyCodeObject *code = (PyCodeObject*) PyStackRef_AsPyObjectBorrow(iframe->f_executable);
             Py_ssize_t first_instr_addr = (Py_ssize_t) code->co_code_adaptive;
             Py_ssize_t current_instr_addr = (Py_ssize_t) iframe->instr_ptr;
             Py_ssize_t offset = current_instr_addr - first_instr_addr;
@@ -368,14 +368,14 @@ namespace utils {
         }
 
         Py_ssize_t get_current_stack_depth(sauerkraut::PyInterpreterFrame *iframe) {
-            // WARNING: The stack pointer is most often NULL when 
+            // WARNING: The stack pointer is most often NULL when
             // we stop a running Python function. Unless the function is stopped on a
             // yield instruction (which will not happen in this library, as we are stopped
             // on a CALL, then the stack pointer will be NULL.
             // This is NOT the method
             // you should use when trying to get the stack depth of a running frame.
             // Use get_stack_depth(PyObject *) instead.
-            PyCodeObject *code = (PyCodeObject*) iframe->f_executable.bits;
+            PyCodeObject *code = (PyCodeObject*) PyStackRef_AsPyObjectBorrow(iframe->f_executable);
             auto n_localsplus = get_code_nlocalsplus(code);
             #if SAUERKRAUT_PY314
             assert(NULL != iframe->stackpointer);
@@ -424,7 +424,7 @@ namespace utils {
         }
 
         _PyStackRef *get_stack_base(sauerkraut::PyInterpreterFrame *f) {
-            return f->localsplus + ((PyCodeObject*)f->f_executable.bits)->co_nlocalsplus;
+            return f->localsplus + ((PyCodeObject*)PyStackRef_AsPyObjectBorrow(f->f_executable))->co_nlocalsplus;
         }
 
         template<typename T>
@@ -458,7 +458,7 @@ namespace utils {
             _PyStackRef *frame_locals = iframe->localsplus;
             std::map<intptr_t, int> locals;
             for(int i = 0; i < code->co_nlocalsplus; i++) {
-                PyObject *local = ((PyObject*) frame_locals[i].bits);
+                PyObject *local = PyStackRef_AsPyObjectBorrow(frame_locals[i]);
                 if(NULL == local) {
                     continue;
                 }
@@ -468,7 +468,7 @@ namespace utils {
 
             _PyStackRef *stack_pointer = iframe->localsplus + code->co_nlocalsplus;
             for(int i = 0; i < stack_depth; i++) {
-                PyObject *stack_obj = (PyObject*) stack_pointer[i].bits;
+                PyObject *stack_obj = PyStackRef_AsPyObjectBorrow(stack_pointer[i]);
                 #ifdef DEBUG
                 assert(NULL != stack_obj);
                 if(locals.find((intptr_t) stack_obj) != locals.end()) {
@@ -485,7 +485,7 @@ namespace utils {
         StackState get_stack_state(pyobject_weakref frame) {
             py_weakref<struct _frame> frame_obj{(struct _frame*) *frame};
             _PyInterpreterFrame *iframe = (_PyInterpreterFrame*) frame_obj->f_frame;
-            PyCodeObject *code = (PyCodeObject*) iframe->f_executable.bits;
+            PyCodeObject *code = (PyCodeObject*) PyStackRef_AsPyObjectBorrow(iframe->f_executable);
             auto stack_depth = get_stack_depth((PyObject*)*frame);
             auto state = _get_stack_state_locals(*frame_obj, code, stack_depth);
             return state;
@@ -502,7 +502,7 @@ namespace utils {
             LocalNameMap local_idx_map;
 
             for(int i = 0; i < code->co_nlocalsplus; i++) {
-                PyObject *local = ((PyObject*) iframe->localsplus[i].bits);
+                PyObject *local = PyStackRef_AsPyObjectBorrow(iframe->localsplus[i]);
                 std::string name = PyUnicode_AsUTF8(PyTuple_GetItem(locals_plus_names, i));
                 local_idx_map[name] = i;
             }
@@ -575,12 +575,12 @@ namespace utils {
                 }
                 
                 if (local_index >= 0) {
-                    PyObject *old_local = (PyObject*) iframe->localsplus[local_index].bits;
-                    
+                    PyObject *old_local = PyStackRef_AsPyObjectBorrow(iframe->localsplus[local_index]);
+
                     // Increment reference count of new value before assigning
                     Py_INCREF(value);
                     iframe->localsplus[local_index].bits = (intptr_t) value;
-                    
+
                     // Decrement reference count of old value
                     Py_XDECREF(old_local);
                 }

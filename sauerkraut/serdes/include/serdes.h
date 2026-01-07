@@ -422,7 +422,7 @@ namespace serdes {
         std::pair<flatbuffers::Offset<flatbuffers::Vector<offsets::PyObjectOffset>>, 
                   flatbuffers::Offset<flatbuffers::Vector<uint8_t>>> 
         serialize_fast_locals_plus(Builder &builder, sauerkraut::PyInterpreterFrame &obj, serdes::SerializationArgs& ser_args) {
-            auto n_locals = utils::py::get_code_nlocals((PyCodeObject*)obj.f_executable.bits);
+            auto n_locals = utils::py::get_code_nlocals((PyCodeObject*)PyStackRef_AsPyObjectBorrow(obj.f_executable));
             auto exclude_local_bitmask = ser_args.exclude_locals.value_or(std::vector<bool>(n_locals, false));
             std::vector<offsets::PyObjectOffset> localsplus;
             
@@ -430,7 +430,7 @@ namespace serdes {
             uint8_bitmask.reserve(n_locals);
             int non_excluded_count = 0;
             for (int i = 0; i < n_locals; i++) {
-                if((PyObject*)obj.localsplus[i].bits == NULL || exclude_local_bitmask[i]) {
+                if(PyStackRef_AsPyObjectBorrow(obj.localsplus[i]) == NULL || exclude_local_bitmask[i]) {
                     // a local can be NULL if it has not been initialized for the first time
                     uint8_bitmask.push_back(1);
                 } else {
@@ -444,7 +444,7 @@ namespace serdes {
             // Only serialize non-excluded locals
             for(int i = 0; i < n_locals; i++) {
                 auto local = obj.localsplus[i];
-                PyObject *local_pyobj = (PyObject*)local.bits;
+                PyObject *local_pyobj = PyStackRef_AsPyObjectBorrow(local);
 
                 if(NULL == local_pyobj || exclude_local_bitmask[i]) {
                     continue;
@@ -471,9 +471,13 @@ namespace serdes {
             offsets::PyObjectOffset f_func_obj_ser;
             offsets::PyObjectOffset f_globals_ser;
 
-            f_executable_ser = code_serializer.serialize(builder, (PyCodeObject*)obj.f_executable.bits, ser_args);
+            f_executable_ser = code_serializer.serialize(builder, (PyCodeObject*)PyStackRef_AsPyObjectBorrow(obj.f_executable), ser_args);
             if(!ser_args.exclude_immutables) {
+                #if SAUERKRAUT_PY314
+                f_func_obj_ser = po_serializer.serialize(builder, PyStackRef_AsPyObjectBorrow(obj.f_funcobj));
+                #elif SAUERKRAUT_PY313
                 f_func_obj_ser = po_serializer.serialize(builder, obj.f_funcobj);
+                #endif
                 f_globals_ser = po_serializer.serialize_dill(builder, obj.f_globals);
             }
 
