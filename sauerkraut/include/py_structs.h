@@ -7,6 +7,16 @@ typedef union _PyStackRef {
     uintptr_t bits;
 } _PyStackRef;
 
+#if SAUERKRAUT_PY314
+#define Py_TAG_REFCNT 1
+#define Py_INT_TAG 3
+#define PyStackRef_IsTaggedInt(ref) ((((ref).bits) & Py_INT_TAG) == Py_INT_TAG)
+#define PyStackRef_AsPyObjectBorrow(ref) ((PyObject*)(((ref).bits) & (~(uintptr_t)Py_TAG_REFCNT)))
+#elif SAUERKRAUT_PY313
+#define PyStackRef_IsTaggedInt(ref) (0)
+#define PyStackRef_AsPyObjectBorrow(ref) ((PyObject*)((ref).bits))
+#endif
+
 // Dummy definition: real definition is in pycore_code.h
 typedef struct _CodeUnit {
     uint8_t opcode;
@@ -23,6 +33,9 @@ struct _frame {
     char f_trace_opcodes;       /* Emit per-opcode trace events? */
     PyObject *f_extra_locals;   /* Dict for locals set by users using f_locals, could be NULL */
     PyObject *f_locals_cache;   /* Backwards compatibility for PyEval_GetLocals */
+    #if SAUERKRAUT_PY314
+    PyObject *f_overwritten_fast_locals; /* Support for borrowed refs to fast locals */
+    #endif
     PyObject *_f_frame_data[1]; /* Frame data if this frame object owns the frame */
 };
 
@@ -32,7 +45,11 @@ _PyThreadState_PushFrame(PyThreadState *tstate, size_t size);
 typedef struct _PyInterpreterFrame {
     _PyStackRef f_executable; /* Deferred or strong reference (code object or None) */
     struct _PyInterpreterFrame *previous;
+    #if SAUERKRAUT_PY314
+    _PyStackRef f_funcobj; /* Deferred or strong reference. Only valid if not on C stack */
+    #elif SAUERKRAUT_PY313
     PyObject *f_funcobj; /* Strong reference. Only valid if not on C stack */
+    #endif
     PyObject *f_globals; /* Borrowed reference. Only valid if not on C stack */
     PyObject *f_builtins; /* Borrowed reference. Only valid if not on C stack */
     PyObject *f_locals; /* Strong reference, may be NULL. Only valid if not on C stack */
@@ -45,6 +62,9 @@ typedef struct _PyInterpreterFrame {
     #endif
     uint16_t return_offset;  /* Only relevant during a function call */
     char owner;
+    #if SAUERKRAUT_PY314
+    uint8_t visited;
+    #endif
     /* Locals and stack */
     _PyStackRef localsplus[1];
 } _PyInterpreterFrame;

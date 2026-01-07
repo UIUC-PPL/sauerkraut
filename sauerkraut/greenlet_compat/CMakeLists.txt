@@ -14,7 +14,7 @@ set_target_properties(greenlet_compat PROPERTIES
 
 target_include_directories(greenlet_compat PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${Python_INCLUDE_DIRS}
+    ${Python3_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/sauerkraut/include
 )
 

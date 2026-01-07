@@ -4,7 +4,6 @@
 #include <Python.h>
 
 #if PY_VERSION_HEX >= 0x30D0000 && PY_VERSION_HEX < 0x30E0000
-#    warning "Python 3.13 detected"
 #    define SAUERKRAUT_PY313 1
 #else
 #    define SAUERKRAUT_PY313 0
@@ -14,7 +13,6 @@
 #    define SAUERKRAUT_PY314 1
 #else
 #    define SAUERKRAUT_PY314 0
-#
 #endif
 
 #if !SAUERKRAUT_PY313 && !SAUERKRAUT_PY314

@@ -3,8 +3,14 @@ import types
 import bytecode as bc
 from bytecode import Instr, BasicBlock, ControlFlowGraph, Bytecode
 
-_USE_INSTRS = ("LOAD_NAME", "LOAD_FAST", "LOAD_FAST_CHECK", "LOAD_FAST_AND_CLEAR")
-_SUPER_USE_INSTRS = "LOAD_FAST_LOAD_FAST"
+_USE_INSTRS = (
+    "LOAD_NAME",
+    "LOAD_FAST",
+    "LOAD_FAST_CHECK",
+    "LOAD_FAST_AND_CLEAR",
+    "LOAD_FAST_BORROW",
+)
+_SUPER_USE_INSTRS = ("LOAD_FAST_LOAD_FAST", "LOAD_FAST_BORROW_LOAD_FAST_BORROW")
 _SUPER_DEF_INSTRS = "STORE_FAST_STORE_FAST"
 _DEF_INSTRS = ("STORE_NAME", "STORE_FAST")
 
@@ -96,7 +102,11 @@ class LivenessAnalysis:
                 if isinstance(arg1, str):
                     defined_vars.add(arg1)
             elif instr.name == "STORE_FAST_LOAD_FAST":
-                print(f"STORE_FAST_LOAD_FAST: {instr.arg}")
+                store_var, load_var = instr.arg
+                if isinstance(store_var, str):
+                    defined_vars.add(store_var)
+                if isinstance(load_var, str):
+                    used_vars.add(load_var)
 
         return used_vars, defined_vars
 
@@ -206,6 +216,14 @@ class LivenessAnalysis:
                             self._localvars.add(arg0)
                         if isinstance(arg1, str):
                             live_vars.add(arg1)
+                    elif instr.name == "STORE_FAST_LOAD_FAST":
+                        store_var, load_var = instr.arg
+                        if isinstance(store_var, str):
+                            live_vars.discard(store_var)
+                            self._localvars.add(store_var)
+                        if isinstance(load_var, str):
+                            live_vars.add(load_var)
+                            self._localvars.add(load_var)
 
     def get_live_variables_at_offset(self, offset: int) -> Set[str]:
         """Get the set of live variables at a given bytecode offset."""

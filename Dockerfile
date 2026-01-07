@@ -1,5 +1,6 @@
 FROM ubuntu:22.04 AS base
 LABEL maintainer="Zane Fink <zanef2@illinois.edu>"
+ARG PYTHON_VERSION=3.13
 WORKDIR /
 ENV DEBIAN_FRONTEND=noninteractive
 RUN ln -fs /usr/share/zoneinfo/UTC /etc/localtime && \
@@ -18,7 +19,7 @@ ENV PATH=/opt/conda/bin:$PATH
 RUN conda init bash && \
     conda config --add channels conda-forge && \
     conda config --set channel_priority strict && \
-    conda create -n sauerkraut python=3.13 -y -c conda-forge --override-channels && \
+    conda create -n sauerkraut python=${PYTHON_VERSION} -y -c conda-forge --override-channels && \
     echo "conda activate sauerkraut" >> ~/.bashrc
 # Make the conda environment available in PATH
 ENV PATH=/opt/conda/envs/sauerkraut/bin:$PATH

@@ -15,6 +15,10 @@ jobs:
 
   test-linux:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.13', '3.14']
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -28,22 +32,28 @@ jobs:
           context: .
           push: false
           load: true
-          tags: sauerkraut:test
+          tags: sauerkraut:test-${{ matrix.python-version }}
+          build-args: |
+            PYTHON_VERSION=${{ matrix.python-version }}
 
       - name: Run tests
         run: |
-          docker run --rm sauerkraut:test python3 /sauerkraut/test/test.py
+          docker run --rm sauerkraut:test-${{ matrix.python-version }} python3 /sauerkraut/test/test.py
 
   test-macos:
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.13', '3.14']
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Set up Python 3.13
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: |
