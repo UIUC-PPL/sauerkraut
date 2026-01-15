@@ -218,17 +218,21 @@ PyObject *deepcopy_object(py_weakref<PyObject> obj) {
 }
 
 static void cleanup_interpreter_frame(_PyInterpreterFrame *interp, int nlocalsplus, int stack_depth) {
-    Py_XDECREF((PyObject*)interp->f_executable.bits);
+    utils::py::stackref_decref(interp->f_executable);
+    #if SAUERKRAUT_PY314
+    utils::py::stackref_decref(interp->f_funcobj);
+    #elif SAUERKRAUT_PY313
     Py_XDECREF(interp->f_funcobj);
+    #endif
     Py_XDECREF(interp->f_locals);
 
     for (int i = 0; i < nlocalsplus; i++) {
-        Py_XDECREF((PyObject*)interp->localsplus[i].bits);
+        utils::py::stackref_decref(interp->localsplus[i]);
     }
 
     _PyStackRef *stack_base = interp->localsplus + nlocalsplus;
     for (int i = 0; i < stack_depth; i++) {
-        Py_XDECREF((PyObject*)stack_base[i].bits);
+        utils::py::stackref_decref(stack_base[i]);
     }
 
     free(interp);
@@ -247,17 +251,21 @@ typedef struct frame_copy_capsule {
             if (owns_interpreter_frame && frame->f_frame) {
                 auto *interp = frame->f_frame;
 
-                Py_XDECREF((PyObject*)interp->f_executable.bits);
+                utils::py::stackref_decref(interp->f_executable);
+                #if SAUERKRAUT_PY314
+                utils::py::stackref_decref(interp->f_funcobj);
+                #elif SAUERKRAUT_PY313
                 Py_XDECREF(interp->f_funcobj);
+                #endif
                 Py_XDECREF(interp->f_locals);
 
                 for (int i = 0; i < nlocalsplus; i++) {
-                    Py_XDECREF((PyObject*)interp->localsplus[i].bits);
+                    utils::py::stackref_decref(interp->localsplus[i]);
                 }
 
                 _PyStackRef *stack_base = interp->localsplus + nlocalsplus;
                 for (int i = 0; i < stack_depth; i++) {
-                    Py_XDECREF((PyObject*)stack_base[i].bits);
+                    utils::py::stackref_decref(stack_base[i]);
                 }
 
                 // f_globals, f_builtins are borrowed refs; frame_obj is weak (no Py_NewRef)
@@ -297,8 +305,17 @@ void copy_localsplus(py_weakref<sauerkraut::PyInterpreterFrame> to_copy,
                     int nlocals, int deepcopy) {
     if (deepcopy) {
         for (int i = 0; i < nlocals; i++) {
-            py_weakref<PyObject> local{(PyObject*)to_copy->localsplus[i].bits};
+            _PyStackRef local_ref = to_copy->localsplus[i];
+            auto local_obj = utils::py::stackref_to_object_for_serialization(local_ref);
+            if (local_obj.obj == NULL) {
+                new_frame->localsplus[i].bits = 0;
+                continue;
+            }
+            py_weakref<PyObject> local{local_obj.obj};
             PyObject *local_copy = deepcopy_object(local);
+            if (local_obj.owned) {
+                Py_DECREF(local_obj.obj);
+            }
             new_frame->localsplus[i].bits = (uintptr_t)local_copy;
         }
     } else {
@@ -314,8 +331,17 @@ void copy_stack(py_weakref<sauerkraut::PyInterpreterFrame> to_copy,
 
     if(deepcopy) {
         for(int i = 0; i < stack_size; i++) {
-            auto stack_obj = make_weakref((PyObject*)src_stack_base[i].bits);
-            PyObject *stack_obj_copy = deepcopy_object(stack_obj);
+            _PyStackRef stack_ref = src_stack_base[i];
+            auto stack_obj = utils::py::stackref_to_object_for_serialization(stack_ref);
+            if (stack_obj.obj == NULL) {
+                dest_stack_base[i].bits = 0;
+                continue;
+            }
+            auto stack_weak = make_weakref(stack_obj.obj);
+            PyObject *stack_obj_copy = deepcopy_object(stack_weak);
+            if (stack_obj.owned) {
+                Py_DECREF(stack_obj.obj);
+            }
             dest_stack_base[i].bits = (uintptr_t) stack_obj_copy;
         }
     } else {

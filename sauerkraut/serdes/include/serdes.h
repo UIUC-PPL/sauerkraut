@@ -410,9 +410,15 @@ namespace serdes {
 
             _PyStackRef *stack_base = utils::py::get_stack_base(&obj);
             for(size_t i = 0; i < (size_t) stack_depth; i++) {
-                PyObject *stack_obj = (PyObject*) (stack_base[i].bits);
-                auto stack_obj_ser = po_serializer.serialize(builder, stack_obj);
+                auto stack_obj = utils::py::stackref_to_object_for_serialization(stack_base[i]);
+                if (stack_obj.obj == NULL) {
+                    continue;
+                }
+                auto stack_obj_ser = po_serializer.serialize(builder, stack_obj.obj);
                 stack.push_back(stack_obj_ser);
+                if (stack_obj.owned) {
+                    Py_DECREF(stack_obj.obj);
+                }
             }
 
             auto stack_offset = builder.CreateVector(stack);
@@ -430,7 +436,8 @@ namespace serdes {
             uint8_bitmask.reserve(n_locals);
             int non_excluded_count = 0;
             for (int i = 0; i < n_locals; i++) {
-                if((PyObject*)obj.localsplus[i].bits == NULL || exclude_local_bitmask[i]) {
+                _PyStackRef local_ref = obj.localsplus[i];
+                if(utils::py::stackref_is_null(local_ref) || exclude_local_bitmask[i]) {
                     // a local can be NULL if it has not been initialized for the first time
                     uint8_bitmask.push_back(1);
                 } else {
@@ -444,14 +451,20 @@ namespace serdes {
             // Only serialize non-excluded locals
             for(int i = 0; i < n_locals; i++) {
                 auto local = obj.localsplus[i];
-                PyObject *local_pyobj = (PyObject*)local.bits;
+                auto local_pyobj = utils::py::stackref_to_object_for_serialization(local);
 
-                if(NULL == local_pyobj || exclude_local_bitmask[i]) {
+                if(NULL == local_pyobj.obj || exclude_local_bitmask[i]) {
+                    if (local_pyobj.owned) {
+                        Py_DECREF(local_pyobj.obj);
+                    }
                     continue;
                 }
 
-                auto local_ser = po_serializer.serialize(builder, local_pyobj);
+                auto local_ser = po_serializer.serialize(builder, local_pyobj.obj);
                 localsplus.push_back(local_ser);
+                if (local_pyobj.owned) {
+                    Py_DECREF(local_pyobj.obj);
+                }
             }
             
             auto localsplus_offset = builder.CreateVector(localsplus);
@@ -468,12 +481,25 @@ namespace serdes {
         template<typename Builder>
         offsets::PyInterpreterFrameOffset serialize(Builder &builder, sauerkraut::PyInterpreterFrame &obj, int stack_depth, serdes::SerializationArgs& ser_args) {
             offsets::PyCodeObjectOffset f_executable_ser;
-            offsets::PyObjectOffset f_func_obj_ser;
-            offsets::PyObjectOffset f_globals_ser;
+            offsets::PyObjectOffset f_func_obj_ser = 0;
+            offsets::PyObjectOffset f_globals_ser = 0;
+            bool has_f_funcobj = false;
 
             f_executable_ser = code_serializer.serialize(builder, (PyCodeObject*)obj.f_executable.bits, ser_args);
             if(!ser_args.exclude_immutables) {
+                #if SAUERKRAUT_PY314
+                auto func_obj = utils::py::stackref_to_object_for_serialization(obj.f_funcobj);
+                if (func_obj.obj != NULL) {
+                    f_func_obj_ser = po_serializer.serialize(builder, func_obj.obj);
+                    has_f_funcobj = true;
+                }
+                if (func_obj.owned) {
+                    Py_DECREF(func_obj.obj);
+                }
+                #elif SAUERKRAUT_PY313
                 f_func_obj_ser = po_serializer.serialize(builder, obj.f_funcobj);
+                has_f_funcobj = true;
+                #endif
                 f_globals_ser = po_serializer.serialize_dill(builder, obj.f_globals);
             }
 
@@ -489,7 +515,9 @@ namespace serdes {
                 frame_builder.add_f_locals(f_locals_ser.value());
             }
             if(!ser_args.exclude_immutables) {
-                frame_builder.add_f_funcobj(f_func_obj_ser);
+                if (has_f_funcobj) {
+                    frame_builder.add_f_funcobj(f_func_obj_ser);
+                }
                 frame_builder.add_f_globals(f_globals_ser);
             }
 
