@@ -596,6 +596,10 @@ static PyObject *_copy_serialize_frame_object(py_weakref<PyFrameObject> frame, c
     }
 
     serdes::SerializationArgs args = options.to_ser_args();
+    if (!apply_exclusions(frame, options, args)) {
+        Py_DECREF(capsule);
+        return NULL;
+    }
     PyObject *ret = _serialize_frame_from_capsule(capsule, args);
     Py_DECREF(capsule);  // Done with the capsule
     return ret;
