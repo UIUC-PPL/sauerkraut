@@ -127,4 +127,4 @@ python3 copy_then_serialize.py
 
 ## Compatibility
 Sauerkraut leverages intimate knowledge of CPython internals, and as such is vulnerable to changes in the CPython API and VM.
-Currently, Sauerkraut supports Python 3.13 and the development version of Python 3.14.
+Currently, Sauerkraut supports Python 3.13 and 3.14.
