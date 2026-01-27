@@ -422,6 +422,13 @@ PyFrameObject *create_copied_frame(py_weakref<PyThreadState> tstate,
         return NULL;
     }
 
+    // PyFrame_New incref'd locals and stored them in the embedded frame.
+    // Clear them before replacing f_frame to avoid leaking that reference.
+    if (new_frame->f_frame && new_frame->f_frame->f_locals) {
+        Py_DECREF(new_frame->f_frame->f_locals);
+        new_frame->f_frame->f_locals = NULL;
+    }
+
     new_frame->f_frame = stack_frame;
     py_weakref<sauerkraut::PyInterpreterFrame> new_frame_ref{new_frame->f_frame};
 
@@ -573,7 +580,9 @@ static PyObject *_copy_frame_object(py_weakref<PyFrameObject> frame, const Seria
     auto stack_state = utils::py::get_stack_state((PyObject*)*frame);
     PyFrameObject *new_frame = create_copied_frame(tstate, to_copy, copy_code_obj, LocalCopy, 0, 1, 0, stack_state.size(), 1);
 
-    PyObject *capsule = frame_copy_capsule_create(new_frame, stack_state, true);
+    int nlocalsplus = copy_code_obj->co_nlocalsplus;
+    int stack_depth = stack_state.size();
+    PyObject *capsule = frame_copy_capsule_create(new_frame, stack_state, true, nlocalsplus, stack_depth);
     Py_DECREF(new_frame);  // Drop our ref; capsule holds its own
     Py_DECREF(copy_code_obj);
     Py_DECREF(LocalCopy);
