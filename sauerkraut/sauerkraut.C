@@ -33,18 +33,42 @@ class sauerkraut_modulestate {
         pyobject_strongref liveness_module;
         pyobject_strongref get_dead_variables_at_offset;
         PyCodeImmutableCache code_immutable_cache;
-        sauerkraut_modulestate() {
-            deepcopy_module = PyImport_ImportModule("copy");
-            deepcopy = PyObject_GetAttrString(*deepcopy_module, "deepcopy");
-            pickle_module = PyImport_ImportModule("pickle");
-            pickle_dumps = PyObject_GetAttrString(*pickle_module, "dumps");
-            pickle_loads = PyObject_GetAttrString(*pickle_module, "loads");
+        sauerkraut_modulestate() = default;
 
-            dill_module = PyImport_ImportModule("dill");
-            dill_dumps = PyObject_GetAttrString(*dill_module, "dumps");
-            dill_loads = PyObject_GetAttrString(*dill_module, "loads");
-            liveness_module = PyImport_ImportModule("sauerkraut.liveness");
-            get_dead_variables_at_offset = PyObject_GetAttrString(*liveness_module, "get_dead_variables_at_offset");
+        bool init() {
+            auto import_module = [](const char* name, pyobject_strongref& dest) -> bool {
+                dest = PyImport_ImportModule(name);
+                return static_cast<bool>(dest);
+            };
+
+            auto get_attr = [](pyobject_strongref& module, const char* attr, pyobject_strongref& dest) -> bool {
+                dest = PyObject_GetAttrString(*module, attr);
+                return static_cast<bool>(dest);
+            };
+
+            if (!import_module("copy", deepcopy_module) ||
+                !get_attr(deepcopy_module, "deepcopy", deepcopy)) {
+                return false;
+            }
+
+            if (!import_module("pickle", pickle_module) ||
+                !get_attr(pickle_module, "dumps", pickle_dumps) ||
+                !get_attr(pickle_module, "loads", pickle_loads)) {
+                return false;
+            }
+
+            if (!import_module("dill", dill_module) ||
+                !get_attr(dill_module, "dumps", dill_dumps) ||
+                !get_attr(dill_module, "loads", dill_loads)) {
+                return false;
+            }
+
+            if (!import_module("sauerkraut.liveness", liveness_module) ||
+                !get_attr(liveness_module, "get_dead_variables_at_offset", get_dead_variables_at_offset)) {
+                return false;
+            }
+
+            return true;
         }
 
         pyobject_strongref get_dead_variables(py_weakref<PyCodeObject> code, int offset) {
@@ -95,6 +119,22 @@ class sauerkraut_modulestate {
 
         std::optional<PyCodeImmutables> get_code_immutables(serdes::DeserializedPyFrame &frame) {
             return get_code_immutables(frame.f_frame);
+        }
+
+        void clear() {
+            // Clear the cache first - this decrefs Python objects while interpreter is still valid
+            code_immutable_cache.clear();
+            // Clear all module references
+            deepcopy.reset();
+            deepcopy_module.reset();
+            pickle_module.reset();
+            pickle_dumps.reset();
+            pickle_loads.reset();
+            dill_module.reset();
+            dill_dumps.reset();
+            dill_loads.reset();
+            liveness_module.reset();
+            get_dead_variables_at_offset.reset();
         }
 
 };
@@ -398,11 +438,6 @@ PyFrameObject *create_copied_frame(py_weakref<PyThreadState> tstate,
     new_frame_ref->f_locals = to_copy->f_locals;
     new_frame_ref->return_offset = to_copy->return_offset;
     new_frame_ref->frame_obj = new_frame;
-    #if SAUERKRAUT_PY314
-    new_frame->f_frame->stackpointer = NULL;
-    #elif SAUERKRAUT_PY313
-    new_frame->f_frame->stacktop = 0;
-    #endif
     auto offset = utils::py::get_instr_offset<utils::py::Units::Bytes>(to_copy);
     new_frame->f_frame->instr_ptr = (_CodeUnit*) (code_obj->co_code_adaptive + offset);
 
@@ -549,20 +584,20 @@ static PyObject *_copy_frame_object(py_weakref<PyFrameObject> frame, const Seria
 
 
 static PyObject *_copy_serialize_frame_object(py_weakref<PyFrameObject> frame, const SerializationOptions& options) {
-    using namespace utils;
-    serdes::SerializationArgs args = options.to_ser_args();
-    
-    if (!apply_exclusions(frame, options, args)) {
+    if(options.exclude_immutables) {
+        sauerkraut_state->cache_code_immutables(frame);
+    }
+
+    // First copy the frame, then serialize from the copy
+    // This ensures we have a consistent snapshot of the frame state
+    PyObject *capsule = _copy_frame_object(frame, options);
+    if (capsule == NULL) {
         return NULL;
     }
 
-    if(options.exclude_immutables) {
-        sauerkraut_state->cache_code_immutables(frame);
-    }     
-    auto stack_state = utils::py::get_stack_state((PyObject*)*frame);
-    std::unique_ptr<frame_copy_capsule> capsule(frame_copy_capsule_create_direct(frame, stack_state));
-
-    PyObject *ret = _serialize_frame_direct_from_capsule(capsule.get(), args);
+    serdes::SerializationArgs args = options.to_ser_args();
+    PyObject *ret = _serialize_frame_from_capsule(capsule, args);
+    Py_DECREF(capsule);  // Done with the capsule
     return ret;
 }
 
@@ -956,7 +991,6 @@ static PyObject *_deserialize_frame(PyObject *bytes, bool inplace=false) {
     auto serframe = pyframe_buffer::GetPyFrame(data);
     auto deserframe = frame_serdes.deserialize(serframe);
 
-    // FRAME_OWNED_BY_THREAD
     assert(deserframe.f_frame.owner == 0);
     pycode_strongref code;
     if(deserframe.f_frame.f_executable.immutables_included()) {
