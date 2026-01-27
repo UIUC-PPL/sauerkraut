@@ -3,8 +3,8 @@ import types
 import bytecode as bc
 from bytecode import Instr, BasicBlock, ControlFlowGraph, Bytecode
 
-_USE_INSTRS = ("LOAD_NAME", "LOAD_FAST", "LOAD_FAST_CHECK", "LOAD_FAST_AND_CLEAR")
-_SUPER_USE_INSTRS = "LOAD_FAST_LOAD_FAST"
+_USE_INSTRS = ("LOAD_NAME", "LOAD_FAST", "LOAD_FAST_CHECK", "LOAD_FAST_AND_CLEAR", "LOAD_FAST_BORROW")
+_SUPER_USE_INSTRS = ("LOAD_FAST_LOAD_FAST", "LOAD_FAST_BORROW_LOAD_FAST_BORROW")
 _SUPER_DEF_INSTRS = "STORE_FAST_STORE_FAST"
 _DEF_INSTRS = ("STORE_NAME", "STORE_FAST")
 
@@ -96,7 +96,11 @@ class LivenessAnalysis:
                 if isinstance(arg1, str):
                     defined_vars.add(arg1)
             elif instr.name == "STORE_FAST_LOAD_FAST":
-                print(f"STORE_FAST_LOAD_FAST: {instr.arg}")
+                arg0, arg1 = instr.arg
+                if isinstance(arg0, str):
+                    defined_vars.add(arg0)  # First operand is stored
+                if isinstance(arg1, str):
+                    used_vars.add(arg1)     # Second operand is loaded
 
         return used_vars, defined_vars
 
