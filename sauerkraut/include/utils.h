@@ -205,7 +205,14 @@ namespace utils {
        constexpr int STACKREF_TAGGED_SHIFT = 2;
 
        inline bool stackref_is_null(_PyStackRef ref) {
-           return ref.bits == 0;
+           if (ref.bits == 0) return true;
+           // Check for deferred NULL: when only the deferred tag is set (bits=0x1)
+           // After clearing tags, the pointer would be NULL
+           if ((ref.bits & STACKREF_TAG_BITS) == STACKREF_TAG_REFCNT &&
+               (ref.bits & ~STACKREF_TAG_BITS) == 0) {
+               return true;
+           }
+           return false;
        }
 
        inline bool stackref_is_tagged_int(_PyStackRef ref) {

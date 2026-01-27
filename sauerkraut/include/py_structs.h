@@ -25,6 +25,9 @@ struct _frame {
     char f_trace_opcodes;       /* Emit per-opcode trace events? */
     PyObject *f_extra_locals;   /* Dict for locals set by users using f_locals, could be NULL */
     PyObject *f_locals_cache;   /* Backwards compatibility for PyEval_GetLocals */
+#if SAUERKRAUT_PY314
+    PyObject *f_overwritten_fast_locals;
+#endif
     PyObject *_f_frame_data[1]; /* Frame data if this frame object owns the frame */
 };
 

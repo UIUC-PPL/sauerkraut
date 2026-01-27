@@ -431,7 +431,7 @@ namespace serdes {
             auto n_locals = utils::py::get_code_nlocals((PyCodeObject*)obj.f_executable.bits);
             auto exclude_local_bitmask = ser_args.exclude_locals.value_or(std::vector<bool>(n_locals, false));
             std::vector<offsets::PyObjectOffset> localsplus;
-            
+
             std::vector<uint8_t> uint8_bitmask;
             uint8_bitmask.reserve(n_locals);
             int non_excluded_count = 0;
@@ -445,7 +445,7 @@ namespace serdes {
                     non_excluded_count++;
                 }
             }
-            
+
             localsplus.reserve(non_excluded_count);
 
             // Only serialize non-excluded locals
@@ -466,10 +466,10 @@ namespace serdes {
                     Py_DECREF(local_pyobj.obj);
                 }
             }
-            
+
             auto localsplus_offset = builder.CreateVector(localsplus);
             auto bitmask_offset = builder.CreateVector(uint8_bitmask);
-            
+
             return std::make_pair(localsplus_offset, bitmask_offset);
         }
 
@@ -553,10 +553,10 @@ namespace serdes {
 
             auto localsplus = obj->locals_plus();
             auto exclusion_bitmask = obj->locals_exclusion_bitmask();
-            
+
             int total_locals = exclusion_bitmask->size();
             deser.localsplus.reserve(total_locals);
-            
+
             int localsplus_idx = 0;
             for(int i = 0; i < total_locals; i++) {
                 if(exclusion_bitmask->Get(i) != 0) {
