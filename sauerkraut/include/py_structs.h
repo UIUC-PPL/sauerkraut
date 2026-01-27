@@ -13,6 +13,8 @@ typedef struct _CodeUnit {
     uint8_t oparg;
 } _CodeUnit;
 
+typedef _CodeUnit _Py_CODEUNIT;
+
 struct _frame {
     PyObject_HEAD
     PyFrameObject *f_back;      /* previous frame, or NULL */
@@ -23,6 +25,9 @@ struct _frame {
     char f_trace_opcodes;       /* Emit per-opcode trace events? */
     PyObject *f_extra_locals;   /* Dict for locals set by users using f_locals, could be NULL */
     PyObject *f_locals_cache;   /* Backwards compatibility for PyEval_GetLocals */
+#if SAUERKRAUT_PY314
+    PyObject *f_overwritten_fast_locals;
+#endif
     PyObject *_f_frame_data[1]; /* Frame data if this frame object owns the frame */
 };
 
@@ -32,19 +37,29 @@ _PyThreadState_PushFrame(PyThreadState *tstate, size_t size);
 typedef struct _PyInterpreterFrame {
     _PyStackRef f_executable; /* Deferred or strong reference (code object or None) */
     struct _PyInterpreterFrame *previous;
+#if SAUERKRAUT_PY314
+    _PyStackRef f_funcobj; /* Deferred or strong reference. Only valid if not on C stack */
+#else
     PyObject *f_funcobj; /* Strong reference. Only valid if not on C stack */
+#endif
     PyObject *f_globals; /* Borrowed reference. Only valid if not on C stack */
     PyObject *f_builtins; /* Borrowed reference. Only valid if not on C stack */
     PyObject *f_locals; /* Strong reference, may be NULL. Only valid if not on C stack */
     PyFrameObject *frame_obj; /* Strong reference, may be NULL. Only valid if not on C stack */
-    _CodeUnit *instr_ptr; /* Instruction currently executing (or about to begin) */
-    #if SAUERKRAUT_PY314
+    _Py_CODEUNIT *instr_ptr; /* Instruction currently executing (or about to begin) */
+#if SAUERKRAUT_PY314
     _PyStackRef *stackpointer;
-    #elif SAUERKRAUT_PY313
+#ifdef Py_GIL_DISABLED
+    int32_t tlbc_index; /* Index of thread-local bytecode containing instr_ptr */
+#endif
+#elif SAUERKRAUT_PY313
     int stacktop;
-    #endif
+#endif
     uint16_t return_offset;  /* Only relevant during a function call */
     char owner;
+#if SAUERKRAUT_PY314
+    uint8_t visited;
+#endif
     /* Locals and stack */
     _PyStackRef localsplus[1];
 } _PyInterpreterFrame;

@@ -48,6 +48,10 @@ if(APPLE)
         greenlet_compat
     )
     target_link_options(sauerkraut PRIVATE -undefined dynamic_lookup)
+    set_target_properties(sauerkraut PROPERTIES
+        BUILD_WITH_INSTALL_RPATH ON
+        INSTALL_RPATH "@loader_path"
+    )
 else()
     target_link_libraries(sauerkraut
         PRIVATE

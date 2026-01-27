@@ -73,6 +73,11 @@ class py_strongref {
     T *operator->() {
         return this->borrow();
     }
+
+    void reset() {
+        Py_XDECREF((PyObject*) obj);
+        obj = NULL;
+    }
 };
 
 template <typename T>

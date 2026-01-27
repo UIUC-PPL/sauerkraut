@@ -12,7 +12,7 @@ set(CMAKE_BUILD_TYPE Debug)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -g -Wall")
 
 # Find Python (ensure the version matches your Python version)
-find_package(Python 3.13 COMPONENTS Interpreter Development REQUIRED)
+find_package(Python 3.13...<3.15 COMPONENTS Interpreter Development REQUIRED)
 
 # Set consistent output directories
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})

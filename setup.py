@@ -143,15 +143,18 @@ class CMakeBuild(build_ext):
             # MODULE (.so bundle), helper libs as SHARED (.dylib)
             main_ext = ".so"
             helper_ext = ".dylib"
-            target_ext = ".so"
+            main_target_ext = ".so"
+            helper_target_ext = ".dylib"
         elif sys.platform == "win32":
             main_ext = ".pyd"
             helper_ext = ".pyd"
-            target_ext = ".pyd"
+            main_target_ext = ".pyd"
+            helper_target_ext = ".pyd"
         else:
             main_ext = ".so"
             helper_ext = ".so"
-            target_ext = ".so"
+            main_target_ext = ".so"
+            helper_target_ext = ".so"
 
         package_dir = os.path.join(install_dir, "sauerkraut")
         os.makedirs(package_dir, exist_ok=True)
@@ -159,14 +162,14 @@ class CMakeBuild(build_ext):
         # Copy main module
         main_src = os.path.join(build_temp, f"_sauerkraut{main_ext}")
         if os.path.exists(main_src):
-            dst = os.path.join(package_dir, f"_sauerkraut{target_ext}")
+            dst = os.path.join(package_dir, f"_sauerkraut{main_target_ext}")
             self.copy_file(main_src, dst)
 
         # Copy helper libraries
         for lib_name in ["greenlet_compat", "serdes"]:
             src = os.path.join(build_temp, f"{lib_name}{helper_ext}")
             if os.path.exists(src):
-                target_name = f"{lib_name}{target_ext}"
+                target_name = f"{lib_name}{helper_target_ext}"
                 dst = os.path.join(package_dir, target_name)
                 self.copy_file(src, dst)
 
@@ -239,5 +242,5 @@ setup(
     },
     zip_safe=False,
     python_requires=">=3.13",
-    install_requires=["bytecode", "numpy"],
+    install_requires=["bytecode @ git+https://github.com/ZwFink/bytecode.git", "numpy"],
 )

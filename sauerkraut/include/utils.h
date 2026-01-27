@@ -193,6 +193,143 @@ namespace utils {
            return PyDict_Check(obj);
        }
 
+       struct StackRefObject {
+           PyObject *obj;
+           bool owned;
+       };
+
+       class ScopedStackRefObject {
+           StackRefObject ref;
+       public:
+           ScopedStackRefObject(_PyStackRef stackref);
+           ~ScopedStackRefObject() {
+               if (ref.owned && ref.obj) {
+                   Py_DECREF(ref.obj);
+               }
+           }
+           ScopedStackRefObject(const ScopedStackRefObject&) = delete;
+           ScopedStackRefObject& operator=(const ScopedStackRefObject&) = delete;
+           PyObject* get() const { return ref.obj; }
+           explicit operator bool() const { return ref.obj != nullptr; }
+       };
+
+#if SAUERKRAUT_PY314
+       constexpr uintptr_t STACKREF_TAG_BITS = 0x7;
+       constexpr uintptr_t STACKREF_TAG_INT = 0x3;
+       constexpr uintptr_t STACKREF_TAG_REFCNT = 0x1;
+       constexpr int STACKREF_TAGGED_SHIFT = 2;
+
+       inline bool stackref_is_null(_PyStackRef ref) {
+           if (ref.bits == 0) return true;
+           // Check for deferred NULL: when only the deferred tag is set (bits=0x1)
+           // After clearing tags, the pointer would be NULL
+           if ((ref.bits & STACKREF_TAG_BITS) == STACKREF_TAG_REFCNT &&
+               (ref.bits & ~STACKREF_TAG_BITS) == 0) {
+               return true;
+           }
+           return false;
+       }
+
+       inline bool stackref_is_tagged_int(_PyStackRef ref) {
+           return (ref.bits & STACKREF_TAG_BITS) == STACKREF_TAG_INT;
+       }
+
+       inline bool stackref_is_deferred(_PyStackRef ref) {
+           return (ref.bits & STACKREF_TAG_BITS) == STACKREF_TAG_REFCNT;
+       }
+
+       inline intptr_t stackref_untag_int(_PyStackRef ref) {
+           return ((intptr_t)ref.bits) >> STACKREF_TAGGED_SHIFT;
+       }
+
+       inline PyObject *stackref_as_pyobject(_PyStackRef ref) {
+           if (stackref_is_null(ref) || stackref_is_tagged_int(ref)) {
+               return NULL;
+           }
+           uintptr_t bits = ref.bits;
+           if (stackref_is_deferred(ref)) {
+               bits &= ~STACKREF_TAG_BITS;
+           }
+           return (PyObject *)bits;
+       }
+
+       inline StackRefObject stackref_to_object_for_serialization(_PyStackRef ref) {
+           if (stackref_is_null(ref)) {
+               return {NULL, false};
+           }
+           if (stackref_is_tagged_int(ref)) {
+               auto value = (Py_ssize_t) stackref_untag_int(ref);
+               return {PyLong_FromSsize_t(value), true};
+           }
+           return {stackref_as_pyobject(ref), false};
+       }
+
+       inline void stackref_decref(_PyStackRef ref) {
+           if (stackref_is_null(ref) || stackref_is_tagged_int(ref)) {
+               return;
+           }
+           Py_XDECREF(stackref_as_pyobject(ref));
+       }
+
+       inline PyObject *get_funcobj(sauerkraut::PyInterpreterFrame *frame) {
+           return stackref_as_pyobject(frame->f_funcobj);
+       }
+
+       inline void set_funcobj(sauerkraut::PyInterpreterFrame *frame, PyObject *obj) {
+           frame->f_funcobj.bits = (uintptr_t)obj;
+       }
+
+       inline void set_stack_position(sauerkraut::PyInterpreterFrame *frame, int nlocalsplus, int stack_depth) {
+           frame->stackpointer = frame->localsplus + nlocalsplus + stack_depth;
+       }
+
+       inline void init_frame_visited(sauerkraut::PyInterpreterFrame *frame) {
+           frame->visited = 0;
+       }
+#else
+       inline bool stackref_is_null(_PyStackRef ref) {
+           return ref.bits == 0;
+       }
+
+       inline bool stackref_is_tagged_int(_PyStackRef) {
+           return false;
+       }
+
+       inline PyObject *stackref_as_pyobject(_PyStackRef ref) {
+           return (PyObject *) ref.bits;
+       }
+
+       inline StackRefObject stackref_to_object_for_serialization(_PyStackRef ref) {
+           if (ref.bits == 0) {
+               return {NULL, false};
+           }
+           return {(PyObject *) ref.bits, false};
+       }
+
+       inline void stackref_decref(_PyStackRef ref) {
+           Py_XDECREF((PyObject *) ref.bits);
+       }
+
+       inline PyObject *get_funcobj(sauerkraut::PyInterpreterFrame *frame) {
+           return frame->f_funcobj;
+       }
+
+       inline void set_funcobj(sauerkraut::PyInterpreterFrame *frame, PyObject *obj) {
+           frame->f_funcobj = obj;
+       }
+
+       inline void set_stack_position(sauerkraut::PyInterpreterFrame *frame, int nlocalsplus, int stack_depth) {
+           frame->stacktop = nlocalsplus + stack_depth;
+       }
+
+       inline void init_frame_visited(sauerkraut::PyInterpreterFrame *) {
+           // No-op for Python 3.13
+       }
+#endif
+
+       inline ScopedStackRefObject::ScopedStackRefObject(_PyStackRef stackref)
+           : ref(stackref_to_object_for_serialization(stackref)) {}
+
        int get_code_stacksize(PyCodeObject *code) {
             return code->co_stacksize;
        }
@@ -468,7 +605,11 @@ namespace utils {
 
             _PyStackRef *stack_pointer = iframe->localsplus + code->co_nlocalsplus;
             for(int i = 0; i < stack_depth; i++) {
-                PyObject *stack_obj = (PyObject*) stack_pointer[i].bits;
+                _PyStackRef stack_ref = stack_pointer[i];
+                PyObject *stack_obj = stackref_as_pyobject(stack_ref);
+                if (stack_obj == NULL && stackref_is_tagged_int(stack_ref)) {
+                    stack_obj = Py_None;
+                }
                 #ifdef DEBUG
                 assert(NULL != stack_obj);
                 if(locals.find((intptr_t) stack_obj) != locals.end()) {
@@ -502,7 +643,7 @@ namespace utils {
             LocalNameMap local_idx_map;
 
             for(int i = 0; i < code->co_nlocalsplus; i++) {
-                PyObject *local = ((PyObject*) iframe->localsplus[i].bits);
+                PyObject *local = stackref_as_pyobject(iframe->localsplus[i]);
                 std::string name = PyUnicode_AsUTF8(PyTuple_GetItem(locals_plus_names, i));
                 local_idx_map[name] = i;
             }
@@ -575,14 +716,14 @@ namespace utils {
                 }
                 
                 if (local_index >= 0) {
-                    PyObject *old_local = (PyObject*) iframe->localsplus[local_index].bits;
+                    _PyStackRef old_ref = iframe->localsplus[local_index];
                     
                     // Increment reference count of new value before assigning
                     Py_INCREF(value);
                     iframe->localsplus[local_index].bits = (intptr_t) value;
                     
                     // Decrement reference count of old value
-                    Py_XDECREF(old_local);
+                    stackref_decref(old_ref);
                 }
             }
         }
