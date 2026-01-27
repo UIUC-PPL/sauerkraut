@@ -1103,9 +1103,12 @@ static PyObject *deserialize_frame(PyObject *self, PyObject *args, PyObject *kwa
     if (run) {
         PyFrameObject *frame = (PyFrameObject*)deser_result;
         if (!handle_replace_locals(replace_locals, frame)) {
+            Py_DECREF(frame);
             return NULL;
         }
-        return run_and_cleanup_frame(frame);
+        PyObject *result = run_and_cleanup_frame(frame);
+        Py_DECREF(frame);
+        return result;
     } else {
         // replace_locals should be applied via run_frame
         return deser_result;
