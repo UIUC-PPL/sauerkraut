@@ -198,6 +198,21 @@ namespace utils {
            bool owned;
        };
 
+       class ScopedStackRefObject {
+           StackRefObject ref;
+       public:
+           ScopedStackRefObject(_PyStackRef stackref);
+           ~ScopedStackRefObject() {
+               if (ref.owned && ref.obj) {
+                   Py_DECREF(ref.obj);
+               }
+           }
+           ScopedStackRefObject(const ScopedStackRefObject&) = delete;
+           ScopedStackRefObject& operator=(const ScopedStackRefObject&) = delete;
+           PyObject* get() const { return ref.obj; }
+           explicit operator bool() const { return ref.obj != nullptr; }
+       };
+
 #if SAUERKRAUT_PY314
        constexpr uintptr_t STACKREF_TAG_BITS = 0x7;
        constexpr uintptr_t STACKREF_TAG_INT = 0x3;
@@ -255,6 +270,22 @@ namespace utils {
            }
            Py_XDECREF(stackref_as_pyobject(ref));
        }
+
+       inline PyObject *get_funcobj(sauerkraut::PyInterpreterFrame *frame) {
+           return stackref_as_pyobject(frame->f_funcobj);
+       }
+
+       inline void set_funcobj(sauerkraut::PyInterpreterFrame *frame, PyObject *obj) {
+           frame->f_funcobj.bits = (uintptr_t)obj;
+       }
+
+       inline void set_stack_position(sauerkraut::PyInterpreterFrame *frame, int nlocalsplus, int stack_depth) {
+           frame->stackpointer = frame->localsplus + nlocalsplus + stack_depth;
+       }
+
+       inline void init_frame_visited(sauerkraut::PyInterpreterFrame *frame) {
+           frame->visited = 0;
+       }
 #else
        inline bool stackref_is_null(_PyStackRef ref) {
            return ref.bits == 0;
@@ -278,7 +309,26 @@ namespace utils {
        inline void stackref_decref(_PyStackRef ref) {
            Py_XDECREF((PyObject *) ref.bits);
        }
+
+       inline PyObject *get_funcobj(sauerkraut::PyInterpreterFrame *frame) {
+           return frame->f_funcobj;
+       }
+
+       inline void set_funcobj(sauerkraut::PyInterpreterFrame *frame, PyObject *obj) {
+           frame->f_funcobj = obj;
+       }
+
+       inline void set_stack_position(sauerkraut::PyInterpreterFrame *frame, int nlocalsplus, int stack_depth) {
+           frame->stacktop = nlocalsplus + stack_depth;
+       }
+
+       inline void init_frame_visited(sauerkraut::PyInterpreterFrame *) {
+           // No-op for Python 3.13
+       }
 #endif
+
+       inline ScopedStackRefObject::ScopedStackRefObject(_PyStackRef stackref)
+           : ref(stackref_to_object_for_serialization(stackref)) {}
 
        int get_code_stacksize(PyCodeObject *code) {
             return code->co_stacksize;

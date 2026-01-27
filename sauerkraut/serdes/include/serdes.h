@@ -487,19 +487,11 @@ namespace serdes {
 
             f_executable_ser = code_serializer.serialize(builder, (PyCodeObject*)obj.f_executable.bits, ser_args);
             if(!ser_args.exclude_immutables) {
-                #if SAUERKRAUT_PY314
-                auto func_obj = utils::py::stackref_to_object_for_serialization(obj.f_funcobj);
-                if (func_obj.obj != NULL) {
-                    f_func_obj_ser = po_serializer.serialize(builder, func_obj.obj);
+                PyObject *func_obj = utils::py::get_funcobj(&obj);
+                if (func_obj != NULL) {
+                    f_func_obj_ser = po_serializer.serialize(builder, func_obj);
                     has_f_funcobj = true;
                 }
-                if (func_obj.owned) {
-                    Py_DECREF(func_obj.obj);
-                }
-                #elif SAUERKRAUT_PY313
-                f_func_obj_ser = po_serializer.serialize(builder, obj.f_funcobj);
-                has_f_funcobj = true;
-                #endif
                 f_globals_ser = po_serializer.serialize_dill(builder, obj.f_globals);
             }
 
