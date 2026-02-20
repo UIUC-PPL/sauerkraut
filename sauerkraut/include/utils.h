@@ -214,20 +214,18 @@ namespace utils {
        };
 
 #if SAUERKRAUT_PY314
-       constexpr uintptr_t STACKREF_TAG_BITS = 0x7;
+       constexpr uintptr_t STACKREF_TAG_BITS = 0x3;
        constexpr uintptr_t STACKREF_TAG_INT = 0x3;
        constexpr uintptr_t STACKREF_TAG_REFCNT = 0x1;
        constexpr int STACKREF_TAGGED_SHIFT = 2;
 
+       inline _PyStackRef stackref_null() {
+           return (_PyStackRef){ .bits = STACKREF_TAG_REFCNT };
+       }
+
        inline bool stackref_is_null(_PyStackRef ref) {
-           if (ref.bits == 0) return true;
-           // Check for deferred NULL: when only the deferred tag is set (bits=0x1)
-           // After clearing tags, the pointer would be NULL
-           if ((ref.bits & STACKREF_TAG_BITS) == STACKREF_TAG_REFCNT &&
-               (ref.bits & ~STACKREF_TAG_BITS) == 0) {
-               return true;
-           }
-           return false;
+           // A zeroed stackref is invalid in 3.14 but may appear in older snapshots.
+           return ref.bits == 0 || ref.bits == STACKREF_TAG_REFCNT;
        }
 
        inline bool stackref_is_tagged_int(_PyStackRef ref) {
@@ -236,6 +234,10 @@ namespace utils {
 
        inline bool stackref_is_deferred(_PyStackRef ref) {
            return (ref.bits & STACKREF_TAG_BITS) == STACKREF_TAG_REFCNT;
+       }
+
+       inline bool stackref_refcount_on_object(_PyStackRef ref) {
+           return !stackref_is_null(ref) && !stackref_is_tagged_int(ref) && !stackref_is_deferred(ref);
        }
 
        inline intptr_t stackref_untag_int(_PyStackRef ref) {
@@ -253,6 +255,26 @@ namespace utils {
            return (PyObject *)bits;
        }
 
+       inline _PyStackRef stackref_from_pyobject_steal(PyObject *obj) {
+           if (obj == NULL) {
+               return stackref_null();
+           }
+           if (_Py_IsImmortal(obj)) {
+               return (_PyStackRef){ .bits = ((uintptr_t)obj) | STACKREF_TAG_REFCNT };
+           }
+           return (_PyStackRef){ .bits = (uintptr_t)obj };
+       }
+
+       inline _PyStackRef stackref_from_pyobject_new(PyObject *obj) {
+           if (obj == NULL) {
+               return stackref_null();
+           }
+           if (_Py_IsImmortal(obj)) {
+               return (_PyStackRef){ .bits = ((uintptr_t)obj) | STACKREF_TAG_REFCNT };
+           }
+           return (_PyStackRef){ .bits = (uintptr_t)Py_NewRef(obj) };
+       }
+
        inline StackRefObject stackref_to_object_for_serialization(_PyStackRef ref) {
            if (stackref_is_null(ref)) {
                return {NULL, false};
@@ -265,10 +287,10 @@ namespace utils {
        }
 
        inline void stackref_decref(_PyStackRef ref) {
-           if (stackref_is_null(ref) || stackref_is_tagged_int(ref)) {
+           if (!stackref_refcount_on_object(ref)) {
                return;
            }
-           Py_XDECREF(stackref_as_pyobject(ref));
+           Py_DECREF(stackref_as_pyobject(ref));
        }
 
        inline PyObject *get_funcobj(sauerkraut::PyInterpreterFrame *frame) {
@@ -276,7 +298,7 @@ namespace utils {
        }
 
        inline void set_funcobj(sauerkraut::PyInterpreterFrame *frame, PyObject *obj) {
-           frame->f_funcobj.bits = (uintptr_t)obj;
+           frame->f_funcobj = stackref_from_pyobject_steal(obj);
        }
 
        inline void set_stack_position(sauerkraut::PyInterpreterFrame *frame, int nlocalsplus, int stack_depth) {
@@ -287,6 +309,10 @@ namespace utils {
            frame->visited = 0;
        }
 #else
+       inline _PyStackRef stackref_null() {
+           return (_PyStackRef){ .bits = 0 };
+       }
+
        inline bool stackref_is_null(_PyStackRef ref) {
            return ref.bits == 0;
        }
@@ -299,6 +325,17 @@ namespace utils {
            return (PyObject *) ref.bits;
        }
 
+       inline _PyStackRef stackref_from_pyobject_steal(PyObject *obj) {
+           return (_PyStackRef){ .bits = (uintptr_t)obj };
+       }
+
+       inline _PyStackRef stackref_from_pyobject_new(PyObject *obj) {
+           if (obj == NULL) {
+               return stackref_null();
+           }
+           return (_PyStackRef){ .bits = (uintptr_t)Py_NewRef(obj) };
+       }
+
        inline StackRefObject stackref_to_object_for_serialization(_PyStackRef ref) {
            if (ref.bits == 0) {
                return {NULL, false};
@@ -307,7 +344,7 @@ namespace utils {
        }
 
        inline void stackref_decref(_PyStackRef ref) {
-           Py_XDECREF((PyObject *) ref.bits);
+           Py_XDECREF(stackref_as_pyobject(ref));
        }
 
        inline PyObject *get_funcobj(sauerkraut::PyInterpreterFrame *frame) {
@@ -354,7 +391,7 @@ namespace utils {
        }
 
        int get_iframe_localsplus_size(sauerkraut::PyInterpreterFrame *iframe) {
-           PyCodeObject *code = (PyCodeObject*) iframe->f_executable.bits;
+           PyCodeObject *code = (PyCodeObject*) stackref_as_pyobject(iframe->f_executable);
            if(NULL == code) {
                return 0;
            }
@@ -387,7 +424,7 @@ namespace utils {
 
         template <Units Unit>
         Py_ssize_t get_instr_offset(py_weakref<sauerkraut::PyInterpreterFrame> iframe) {
-            PyCodeObject *code = (PyCodeObject*) iframe->f_executable.bits;
+            PyCodeObject *code = (PyCodeObject*) stackref_as_pyobject(iframe->f_executable);
             Py_ssize_t first_instr_addr = (Py_ssize_t) code->co_code_adaptive;
             Py_ssize_t current_instr_addr = (Py_ssize_t) iframe->instr_ptr;
             Py_ssize_t offset = current_instr_addr - first_instr_addr;
@@ -512,7 +549,7 @@ namespace utils {
             // This is NOT the method
             // you should use when trying to get the stack depth of a running frame.
             // Use get_stack_depth(PyObject *) instead.
-            PyCodeObject *code = (PyCodeObject*) iframe->f_executable.bits;
+            PyCodeObject *code = (PyCodeObject*) stackref_as_pyobject(iframe->f_executable);
             auto n_localsplus = get_code_nlocalsplus(code);
             #if SAUERKRAUT_PY314
             assert(NULL != iframe->stackpointer);
@@ -561,7 +598,7 @@ namespace utils {
         }
 
         _PyStackRef *get_stack_base(sauerkraut::PyInterpreterFrame *f) {
-            return f->localsplus + ((PyCodeObject*)f->f_executable.bits)->co_nlocalsplus;
+            return f->localsplus + ((PyCodeObject*)stackref_as_pyobject(f->f_executable))->co_nlocalsplus;
         }
 
         template<typename T>
@@ -626,7 +663,7 @@ namespace utils {
         StackState get_stack_state(pyobject_weakref frame) {
             py_weakref<struct _frame> frame_obj{(struct _frame*) *frame};
             _PyInterpreterFrame *iframe = (_PyInterpreterFrame*) frame_obj->f_frame;
-            PyCodeObject *code = (PyCodeObject*) iframe->f_executable.bits;
+            PyCodeObject *code = (PyCodeObject*) stackref_as_pyobject(iframe->f_executable);
             auto stack_depth = get_stack_depth((PyObject*)*frame);
             auto state = _get_stack_state_locals(*frame_obj, code, stack_depth);
             return state;
@@ -717,11 +754,9 @@ namespace utils {
                 
                 if (local_index >= 0) {
                     _PyStackRef old_ref = iframe->localsplus[local_index];
-                    
-                    // Increment reference count of new value before assigning
-                    Py_INCREF(value);
-                    iframe->localsplus[local_index].bits = (intptr_t) value;
-                    
+
+                    iframe->localsplus[local_index] = stackref_from_pyobject_new(value);
+
                     // Decrement reference count of old value
                     stackref_decref(old_ref);
                 }

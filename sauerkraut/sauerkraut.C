@@ -179,7 +179,7 @@ static PyObject *_serialize_frame_direct_from_capsule(frame_copy_capsule *copy_c
 static PyObject *_serialize_frame_from_capsule(PyObject *capsule, serdes::SerializationArgs args);
 
 static inline _PyStackRef *_PyFrame_Stackbase(_PyInterpreterFrame *f) {
-    return f->localsplus + ((PyCodeObject*)f->f_executable.bits)->co_nlocalsplus;
+    return f->localsplus + ((PyCodeObject*)utils::py::stackref_as_pyobject(f->f_executable))->co_nlocalsplus;
 }
 
 
@@ -257,10 +257,14 @@ PyObject *deepcopy_object(py_weakref<PyObject> obj) {
     return copy_obj;
 }
 
-static void decref_interpreter_frame_refs(_PyInterpreterFrame *interp, int nlocalsplus, int stack_depth) {
+static void decref_interpreter_frame_refs(_PyInterpreterFrame *interp, int nlocalsplus, int stack_depth, bool decref_runtime_refs=false) {
     utils::py::stackref_decref(interp->f_executable);
     Py_XDECREF(utils::py::get_funcobj(interp));
     Py_XDECREF(interp->f_locals);
+    if (decref_runtime_refs) {
+        Py_XDECREF(interp->f_globals);
+        Py_XDECREF(interp->f_builtins);
+    }
 
     for (int i = 0; i < nlocalsplus; i++) {
         utils::py::stackref_decref(interp->localsplus[i]);
@@ -272,8 +276,8 @@ static void decref_interpreter_frame_refs(_PyInterpreterFrame *interp, int nloca
     }
 }
 
-static void cleanup_interpreter_frame(_PyInterpreterFrame *interp, int nlocalsplus, int stack_depth) {
-    decref_interpreter_frame_refs(interp, nlocalsplus, stack_depth);
+static void cleanup_interpreter_frame(_PyInterpreterFrame *interp, int nlocalsplus, int stack_depth, bool decref_runtime_refs=false) {
+    decref_interpreter_frame_refs(interp, nlocalsplus, stack_depth, decref_runtime_refs);
     free(interp);
 }
 
@@ -282,6 +286,7 @@ typedef struct frame_copy_capsule {
     PyFrameObject *frame;
     utils::py::StackState stack_state;
     bool owns_interpreter_frame;
+    bool owns_runtime_refs;
     int nlocalsplus;   // For cleanup iteration
     int stack_depth;   // For stack cleanup
 
@@ -289,7 +294,7 @@ typedef struct frame_copy_capsule {
         if (frame) {
             if (owns_interpreter_frame && frame->f_frame) {
                 // f_globals, f_builtins are borrowed refs; frame_obj is weak (no Py_NewRef)
-                decref_interpreter_frame_refs(frame->f_frame, nlocalsplus, stack_depth);
+                decref_interpreter_frame_refs(frame->f_frame, nlocalsplus, stack_depth, owns_runtime_refs);
                 free(frame->f_frame);
                 frame->f_frame = NULL;
             }
@@ -305,18 +310,19 @@ void frame_copy_capsule_destroy(PyObject *capsule) {
     delete copy_capsule;
 }
 
-frame_copy_capsule *frame_copy_capsule_create_direct(py_weakref<PyFrameObject> frame, utils::py::StackState stack_state, bool owns_interpreter_frame = false, int nlocalsplus = 0, int stack_depth = 0) {
+frame_copy_capsule *frame_copy_capsule_create_direct(py_weakref<PyFrameObject> frame, utils::py::StackState stack_state, bool owns_interpreter_frame = false, int nlocalsplus = 0, int stack_depth = 0, bool owns_runtime_refs = false) {
     struct frame_copy_capsule *copy_capsule = new struct frame_copy_capsule;
     copy_capsule->frame = (PyFrameObject*)Py_NewRef(*frame);
     copy_capsule->stack_state = stack_state;
     copy_capsule->owns_interpreter_frame = owns_interpreter_frame;
+    copy_capsule->owns_runtime_refs = owns_runtime_refs;
     copy_capsule->nlocalsplus = nlocalsplus;
     copy_capsule->stack_depth = stack_depth;
     return copy_capsule;
 }
 
-PyObject *frame_copy_capsule_create(py_weakref<PyFrameObject> frame, utils::py::StackState stack_state, bool owns_interpreter_frame = false, int nlocalsplus = 0, int stack_depth = 0) {
-    auto *copy_capsule = frame_copy_capsule_create_direct(frame, stack_state, owns_interpreter_frame, nlocalsplus, stack_depth);
+PyObject *frame_copy_capsule_create(py_weakref<PyFrameObject> frame, utils::py::StackState stack_state, bool owns_interpreter_frame = false, int nlocalsplus = 0, int stack_depth = 0, bool owns_runtime_refs = false) {
+    auto *copy_capsule = frame_copy_capsule_create_direct(frame, stack_state, owns_interpreter_frame, nlocalsplus, stack_depth, owns_runtime_refs);
     return PyCapsule_New(copy_capsule, copy_frame_capsule_name, frame_copy_capsule_destroy);
 }
 
@@ -327,11 +333,11 @@ void copy_localsplus(py_weakref<sauerkraut::PyInterpreterFrame> to_copy,
         for (int i = 0; i < nlocals; i++) {
             utils::py::ScopedStackRefObject local_obj(to_copy->localsplus[i]);
             if (!local_obj) {
-                new_frame->localsplus[i].bits = 0;
+                new_frame->localsplus[i] = utils::py::stackref_null();
                 continue;
             }
             PyObject *local_copy = deepcopy_object(make_weakref(local_obj.get()));
-            new_frame->localsplus[i].bits = (uintptr_t)local_copy;
+            new_frame->localsplus[i] = utils::py::stackref_from_pyobject_steal(local_copy);
         }
     } else {
         memcpy(new_frame->localsplus, to_copy->localsplus, nlocals * sizeof(_PyStackRef));
@@ -348,11 +354,11 @@ void copy_stack(py_weakref<sauerkraut::PyInterpreterFrame> to_copy,
         for(int i = 0; i < stack_size; i++) {
             utils::py::ScopedStackRefObject stack_obj(src_stack_base[i]);
             if (!stack_obj) {
-                dest_stack_base[i].bits = 0;
+                dest_stack_base[i] = utils::py::stackref_null();
                 continue;
             }
             PyObject *stack_obj_copy = deepcopy_object(make_weakref(stack_obj.get()));
-            dest_stack_base[i].bits = (uintptr_t)stack_obj_copy;
+            dest_stack_base[i] = utils::py::stackref_from_pyobject_steal(stack_obj_copy);
         }
     } else {
         memcpy(dest_stack_base, src_stack_base, stack_size * sizeof(_PyStackRef));
@@ -401,10 +407,11 @@ PyFrameObject *create_copied_frame(py_weakref<PyThreadState> tstate,
     new_frame_ref->owner = to_copy->owner;
     new_frame_ref->previous = set_previous ? *to_copy : NULL;
     utils::py::set_funcobj(*new_frame_ref, deepcopy_object(make_weakref(utils::py::get_funcobj(*to_copy))));
-    new_frame_ref->f_executable.bits = (uintptr_t)deepcopy_object(make_weakref((PyObject*)to_copy->f_executable.bits));
+    new_frame_ref->f_executable = utils::py::stackref_from_pyobject_steal(
+        deepcopy_object(make_weakref(utils::py::stackref_as_pyobject(to_copy->f_executable))));
     new_frame_ref->f_globals = to_copy->f_globals;
     new_frame_ref->f_builtins = to_copy->f_builtins;
-    new_frame_ref->f_locals = to_copy->f_locals;
+    new_frame_ref->f_locals = to_copy->f_locals ? Py_NewRef(to_copy->f_locals) : NULL;
     new_frame_ref->return_offset = to_copy->return_offset;
     new_frame_ref->frame_obj = new_frame;
     auto offset = utils::py::get_instr_offset<utils::py::Units::Bytes>(to_copy);
@@ -443,7 +450,7 @@ PyFrameObject *push_frame_for_running(PyThreadState *tstate, _PyInterpreterFrame
     // rather than trying to continue in some other frame
     stack_frame->previous = NULL;
     stack_frame->f_funcobj = to_push->f_funcobj;
-    stack_frame->f_executable.bits = to_push->f_executable.bits;
+    stack_frame->f_executable = to_push->f_executable;
     stack_frame->f_globals = to_push->f_globals;
     stack_frame->f_builtins = to_push->f_builtins;
     stack_frame->f_locals = to_push->f_locals;
@@ -465,6 +472,7 @@ struct SerializationOptions {
     Py_ssize_t sizehint = 0;
     bool exclude_dead_locals = true;
     bool exclude_immutables = false;
+    bool capture_module_source = false;
 
     serdes::SerializationArgs to_ser_args() const {
         serdes::SerializationArgs args;
@@ -472,14 +480,17 @@ struct SerializationOptions {
             args.set_sizehint(sizehint);
         }
         args.set_exclude_immutables(exclude_immutables);
+        args.set_capture_module_source(capture_module_source);
         return args;
     }
 
     void populate(int serialize_int, PyObject* exclude_locals_obj,
-                  int exclude_dead_locals_int, int exclude_immutables_int) {
+                  int exclude_dead_locals_int, int exclude_immutables_int,
+                  int capture_module_source_int) {
         serialize = (serialize_int != 0);
         exclude_dead_locals = (exclude_dead_locals_int != 0);
         exclude_immutables = (exclude_immutables_int != 0);
+        capture_module_source = (capture_module_source_int != 0);
         exclude_locals = pyobject_strongref(exclude_locals_obj);
     }
 };
@@ -606,21 +617,23 @@ static bool parse_sizehint(PyObject* sizehint_obj, Py_ssize_t& sizehint) {
 static bool parse_serialization_options(PyObject* args, PyObject* kwargs, SerializationOptions& options) {
     static char* kwlist[] = {"serialize", "exclude_locals",
                              "exclude_immutables", "sizehint",
-                             "exclude_dead_locals", NULL};
+                             "exclude_dead_locals", "capture_module_source", NULL};
     int serialize = 0;
     PyObject* sizehint_obj = NULL;
     PyObject* exclude_locals = NULL;
     int exclude_dead_locals = 1;
     int exclude_immutables = 0;
+    int capture_module_source = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|pOpOp", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|pOpOpp", kwlist,
                                     &serialize, &exclude_locals,
                                     &exclude_immutables, &sizehint_obj,
-                                    &exclude_dead_locals)) {
+                                    &exclude_dead_locals, &capture_module_source)) {
         return false;
     }
 
-    options.populate(serialize, exclude_locals, exclude_dead_locals, exclude_immutables);
+    options.populate(
+        serialize, exclude_locals, exclude_dead_locals, exclude_immutables, capture_module_source);
     return parse_sizehint(sizehint_obj, options.sizehint);
 }
 
@@ -652,19 +665,23 @@ static PyObject *copy_frame(PyObject *self, PyObject *args, PyObject *kwargs) {
     SerializationOptions options;
 
     static char *kwlist[] = {"frame", "exclude_locals", "sizehint",
-                             "serialize", "exclude_dead_locals", "exclude_immutables", NULL};
+                             "serialize", "exclude_dead_locals", "exclude_immutables",
+                             "capture_module_source", NULL};
     int serialize = 0;
     PyObject* sizehint_obj = NULL;
     PyObject* exclude_locals = NULL;
     int exclude_dead_locals = 1;
     int exclude_immutables = 0;
+    int capture_module_source = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOppp", kwlist,
-                                    &frame, &exclude_locals, &sizehint_obj, &serialize, &exclude_dead_locals, &exclude_immutables)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOpppp", kwlist,
+                                    &frame, &exclude_locals, &sizehint_obj, &serialize,
+                                    &exclude_dead_locals, &exclude_immutables,
+                                    &capture_module_source)) {
         return NULL;
     }
 
-    options.populate(serialize, exclude_locals, exclude_dead_locals, exclude_immutables);
+    options.populate(serialize, exclude_locals, exclude_dead_locals, exclude_immutables, capture_module_source);
     if (!parse_sizehint(sizehint_obj, options.sizehint)) {
         return NULL;
     }
@@ -722,7 +739,156 @@ static PyObject *copy_frame(PyObject *self, PyObject *args, PyObject *kwargs) {
 //     return _copy_run_frame_from_capsule(capsule);
 // }
 
+static bool set_optional_utf8_from_value(
+    PyObject *value, const char *field_name, std::optional<std::string>& output, bool required=false) {
+    if (value == NULL || value == Py_None) {
+        if (required) {
+            PyErr_Format(PyExc_RuntimeError, "Missing required module metadata field '%s'.", field_name);
+            return false;
+        }
+        return true;
+    }
+
+    if (!PyUnicode_Check(value)) {
+        PyErr_Format(PyExc_TypeError, "Module metadata field '%s' must be a string.", field_name);
+        return false;
+    }
+
+    Py_ssize_t size = 0;
+    const char *utf8 = PyUnicode_AsUTF8AndSize(value, &size);
+    if (utf8 == NULL) {
+        return false;
+    }
+    output = std::string(utf8, size);
+    return true;
+}
+
+static pyobject_strongref get_module_source_text(PyObject *module_obj, PyObject *module_name_obj) {
+    auto inspect_module = pyobject_strongref::steal(PyImport_ImportModule("inspect"));
+    if (inspect_module) {
+        auto getsource_fn = pyobject_strongref::steal(
+            PyObject_GetAttrString(inspect_module.borrow(), "getsource"));
+        if (getsource_fn) {
+            auto source_obj = pyobject_strongref::steal(
+                PyObject_CallOneArg(getsource_fn.borrow(), module_obj));
+            if (source_obj) {
+                if (!PyUnicode_Check(source_obj.borrow())) {
+                    PyErr_SetString(PyExc_TypeError, "inspect.getsource returned a non-string value.");
+                    return pyobject_strongref(NULL);
+                }
+                return source_obj;
+            }
+        }
+    }
+    PyErr_Clear();
+
+    auto module_spec = pyobject_strongref::steal(PyObject_GetAttrString(module_obj, "__spec__"));
+    if (module_spec && module_spec.borrow() != Py_None) {
+        auto loader = pyobject_strongref::steal(PyObject_GetAttrString(module_spec.borrow(), "loader"));
+        if (loader && loader.borrow() != Py_None) {
+            auto get_source_fn = pyobject_strongref::steal(
+                PyObject_GetAttrString(loader.borrow(), "get_source"));
+            if (get_source_fn) {
+                auto source_obj = pyobject_strongref::steal(
+                    PyObject_CallOneArg(get_source_fn.borrow(), module_name_obj));
+                if (source_obj && source_obj.borrow() != Py_None) {
+                    if (!PyUnicode_Check(source_obj.borrow())) {
+                        PyErr_SetString(PyExc_TypeError, "loader.get_source returned a non-string value.");
+                        return pyobject_strongref(NULL);
+                    }
+                    return source_obj;
+                }
+            }
+        }
+    }
+    PyErr_Clear();
+    return pyobject_strongref(NULL);
+}
+
+static bool populate_module_capture_metadata(frame_copy_capsule *copy_capsule, serdes::SerializationArgs& args) {
+    if (!args.capture_module_source) {
+        return true;
+    }
+
+    if (copy_capsule == NULL || copy_capsule->frame == NULL ||
+        copy_capsule->frame->f_frame == NULL || copy_capsule->frame->f_frame->f_globals == NULL) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "capture_module_source=True requires a frame with valid globals.");
+        return false;
+    }
+
+    PyObject *globals = copy_capsule->frame->f_frame->f_globals;
+    if (!PyDict_Check(globals)) {
+        PyErr_SetString(PyExc_RuntimeError, "capture_module_source=True requires dictionary globals.");
+        return false;
+    }
+
+    auto module_name_obj = PyDict_GetItemString(globals, "__name__");
+    std::optional<std::string> module_name;
+    if (!set_optional_utf8_from_value(module_name_obj, "__name__", module_name, true)) {
+        return false;
+    }
+
+    std::optional<std::string> module_package;
+    if (!set_optional_utf8_from_value(PyDict_GetItemString(globals, "__package__"), "__package__", module_package)) {
+        return false;
+    }
+
+    std::optional<std::string> module_filename;
+    if (!set_optional_utf8_from_value(PyDict_GetItemString(globals, "__file__"), "__file__", module_filename)) {
+        return false;
+    }
+
+    auto sys_module = pyobject_strongref::steal(PyImport_ImportModule("sys"));
+    if (!sys_module) {
+        return false;
+    }
+    auto modules_dict = pyobject_strongref::steal(PyObject_GetAttrString(sys_module.borrow(), "modules"));
+    if (!modules_dict || !PyDict_Check(modules_dict.borrow())) {
+        PyErr_SetString(PyExc_RuntimeError, "Failed to read sys.modules while capturing module source.");
+        return false;
+    }
+
+    auto module_obj_raw = PyDict_GetItem(modules_dict.borrow(), module_name_obj);
+    if (module_obj_raw == NULL) {
+        PyErr_Format(PyExc_RuntimeError,
+            "capture_module_source=True could not find module '%s' in sys.modules.",
+            module_name.value().c_str());
+        return false;
+    }
+
+    auto module_obj = pyobject_strongref(module_obj_raw);
+    auto source_obj = get_module_source_text(module_obj.borrow(), module_name_obj);
+    if (!source_obj) {
+        if (!PyErr_Occurred()) {
+            PyErr_Format(PyExc_RuntimeError,
+                "capture_module_source=True could not retrieve source for module '%s'.",
+                module_name.value().c_str());
+        }
+        return false;
+    }
+
+    Py_ssize_t source_size = 0;
+    const char *source_utf8 = PyUnicode_AsUTF8AndSize(source_obj.borrow(), &source_size);
+    if (source_utf8 == NULL) {
+        return false;
+    }
+
+    std::vector<uint8_t> module_source(
+        reinterpret_cast<const uint8_t*>(source_utf8),
+        reinterpret_cast<const uint8_t*>(source_utf8) + source_size);
+    args.set_module_name(std::move(module_name));
+    args.set_module_package(std::move(module_package));
+    args.set_module_filename(std::move(module_filename));
+    args.set_module_source(std::move(module_source));
+    return true;
+}
+
 static PyObject *_serialize_frame_direct_from_capsule(frame_copy_capsule *copy_capsule, serdes::SerializationArgs args) {
+    if (!populate_module_capture_metadata(copy_capsule, args)) {
+        return NULL;
+    }
+
     loads_functor loads(sauerkraut_state->pickle_loads, sauerkraut_state->dill_loads);
     dumps_functor dumps(sauerkraut_state->pickle_dumps, sauerkraut_state->dill_dumps);
 
@@ -732,6 +898,9 @@ static PyObject *_serialize_frame_direct_from_capsule(frame_copy_capsule *copy_c
     serdes::PyFrameSerdes frame_serdes{po_serdes};
 
     auto serialized_frame = frame_serdes.serialize(builder, *(static_cast<sauerkraut::PyFrame*>(copy_capsule->frame)), args);
+    if (PyErr_Occurred()) {
+        return NULL;
+    }
     builder.Finish(serialized_frame);
     auto buf = builder.GetBufferPointer();
     auto size = builder.GetSize();
@@ -833,15 +1002,52 @@ static void init_frame(PyFrameObject *frame, py_weakref<PyCodeObject> code, serd
 }
 
 static PyFrameObject *create_pyframe_object(serdes::DeserializedPyFrame& frame_obj, py_weakref<PyCodeObject> code) {
-    // TODO: Double-check that this is the correct size
-    // TODO: What do we do when frame is owned by frame object?
-    // can we just make it owned by thread by construction?
-    // TODO: Should we just make it owned by the frame object?
-    int slots = code->co_nlocalsplus + code->co_stacksize;
-    PyFrameObject *frame = PyObject_GC_NewVar(PyFrameObject, &PyFrame_Type, slots);
+    PyObject *globals = frame_obj.f_frame.f_globals.borrow();
+    if (globals == NULL) {
+        globals = PyEval_GetFrameGlobals();
+    }
+    PyObject *locals = frame_obj.f_frame.f_locals.borrow();
+
+    PyFrameObject *frame = PyFrame_New(PyThreadState_Get(), *code, globals, locals);
+    if (frame == NULL) {
+        return NULL;
+    }
+
+    // We replace the embedded interpreter frame pointer below. Drop locals
+    // retained by PyFrame_New to avoid leaking the embedded frame's reference.
+    if (frame->f_frame && frame->f_frame->f_locals) {
+        Py_DECREF(frame->f_frame->f_locals);
+        frame->f_frame->f_locals = NULL;
+    }
+
     init_frame(frame, code, frame_obj);
 
     return frame;
+}
+
+static PyObject *get_module_globals_from_sys_modules(const std::optional<std::string>& module_name) {
+    if (!module_name.has_value()) {
+        return NULL;
+    }
+
+    auto sys_module = pyobject_strongref::steal(PyImport_ImportModule("sys"));
+    if (!sys_module) {
+        PyErr_Clear();
+        return NULL;
+    }
+
+    auto modules = pyobject_strongref::steal(PyObject_GetAttrString(sys_module.borrow(), "modules"));
+    if (!modules || !PyDict_Check(modules.borrow())) {
+        PyErr_Clear();
+        return NULL;
+    }
+
+    PyObject *module_obj = PyDict_GetItemString(modules.borrow(), module_name.value().c_str());
+    if (module_obj == NULL || !PyModule_Check(module_obj)) {
+        return NULL;
+    }
+
+    return PyModule_GetDict(module_obj);
 }
 
 static void init_pyinterpreterframe(sauerkraut::PyInterpreterFrame *interp_frame, 
@@ -853,13 +1059,29 @@ static void init_pyinterpreterframe(sauerkraut::PyInterpreterFrame *interp_frame
     interp_frame->f_locals = NULL;
     interp_frame->previous = NULL;
 
-    interp_frame->f_executable.bits = (uintptr_t)Py_NewRef(code.borrow());
+    interp_frame->f_executable = utils::py::stackref_from_pyobject_new((PyObject*)code.borrow());
     if(frame_obj.f_executable.immutables_included()) {
-        utils::py::set_funcobj(interp_frame, Py_NewRef(frame_obj.f_funcobj.value().borrow()));
-        if(NULL != frame_obj.f_globals) {
-            interp_frame->f_globals = frame_obj.f_globals.borrow();
+        if (frame_obj.f_funcobj.has_value()) {
+            utils::py::set_funcobj(interp_frame, Py_NewRef(frame_obj.f_funcobj.value().borrow()));
         } else {
-            interp_frame->f_globals = PyEval_GetFrameGlobals();
+            utils::py::set_funcobj(interp_frame, NULL);
+        }
+
+        if(NULL != *frame_obj.f_globals) {
+            interp_frame->f_globals = Py_NewRef(frame_obj.f_globals.borrow());
+        } else {
+            PyObject *stable_globals = get_module_globals_from_sys_modules(frame_obj.module_name);
+            if (stable_globals == NULL) {
+                PyObject *funcobj = utils::py::get_funcobj(interp_frame);
+                if (funcobj != NULL && PyFunction_Check(funcobj)) {
+                    stable_globals = PyFunction_GetGlobals(funcobj);
+                }
+            }
+            if (stable_globals != NULL) {
+                interp_frame->f_globals = Py_NewRef(stable_globals);
+            } else {
+                interp_frame->f_globals = Py_NewRef(PyEval_GetFrameGlobals());
+            }
         }
     } else {
         auto invariants = sauerkraut_state->get_code_immutables(frame_obj);
@@ -873,9 +1095,9 @@ static void init_pyinterpreterframe(sauerkraut::PyInterpreterFrame *interp_frame
     }
 
     if(NULL != *frame_obj.f_builtins) {
-        interp_frame->f_builtins = frame_obj.f_builtins.borrow();
+        interp_frame->f_builtins = Py_NewRef(frame_obj.f_builtins.borrow());
     } else {
-        interp_frame->f_builtins = PyEval_GetFrameBuiltins();
+        interp_frame->f_builtins = Py_NewRef(PyEval_GetFrameBuiltins());
     }
     
     // These are NOT fast locals, those come from localsplus
@@ -886,15 +1108,15 @@ static void init_pyinterpreterframe(sauerkraut::PyInterpreterFrame *interp_frame
     // Here are the locals plus
     auto localsplus = frame_obj.localsplus;
     for(size_t i = 0; i < localsplus.size(); i++) {
-        interp_frame->localsplus[i].bits = (intptr_t) Py_NewRef(localsplus[i].borrow());
+        interp_frame->localsplus[i] = utils::py::stackref_from_pyobject_new(localsplus[i].borrow());
     }
     auto stack = frame_obj.stack;
     _PyStackRef *frame_stack_base = utils::py::get_stack_base(interp_frame);
     for(size_t i = 0; i < stack.size(); i++) {
-        frame_stack_base[i].bits = (intptr_t) Py_NewRef(stack[i].borrow());
+        frame_stack_base[i] = utils::py::stackref_from_pyobject_new(stack[i].borrow());
     }
     for(size_t i = localsplus.size(); i < (size_t)code->co_nlocalsplus; i++) {
-        interp_frame->localsplus[i].bits = 0;
+        interp_frame->localsplus[i] = utils::py::stackref_null();
     }
     interp_frame->instr_ptr = (sauerkraut::PyBitcodeInstruction*)
         (utils::py::get_code_adaptive(code) + frame_obj.instr_offset/2);//utils::py::get_offset_for_skipping_call();
@@ -928,7 +1150,7 @@ static sauerkraut::PyInterpreterFrame *create_pyinterpreterframe_object(serdes::
     return interp_frame;
 }
 
-static PyObject *_deserialize_frame(PyObject *bytes, bool inplace=false) {
+static PyObject *_deserialize_frame(PyObject *bytes, bool inplace=false, bool reconstruct_module=true) {
     if(PyErr_Occurred()) {
         PyErr_Print();
         return NULL;
@@ -941,7 +1163,10 @@ static PyObject *_deserialize_frame(PyObject *bytes, bool inplace=false) {
     uint8_t *data = (uint8_t *)PyBytes_AsString(bytes);
 
     auto serframe = pyframe_buffer::GetPyFrame(data);
-    auto deserframe = frame_serdes.deserialize(serframe);
+    auto deserframe = frame_serdes.deserialize(serframe, reconstruct_module);
+    if (PyErr_Occurred()) {
+        return NULL;
+    }
 
     assert(deserframe.f_frame.owner == 0);
     pycode_strongref code;
@@ -968,7 +1193,7 @@ static PyObject *_deserialize_frame(PyObject *bytes, bool inplace=false) {
         int nlocalsplus = code->co_nlocalsplus;
         int stack_depth = deserframe.f_frame.stack.size();
         utils::py::StackState stack_state;
-        PyObject *capsule = frame_copy_capsule_create(frame, stack_state, true, nlocalsplus, stack_depth);
+        PyObject *capsule = frame_copy_capsule_create(frame, stack_state, true, nlocalsplus, stack_depth, true);
         Py_DECREF(frame);  // Drop our ref; capsule holds its own
         return capsule;
     }
@@ -987,9 +1212,9 @@ static PyObject *run_frame_direct(py_weakref<PyFrameObject> frame) {
     }
 
     // Copy all fields from the heap frame to the stack frame
-    stack_frame->f_executable.bits = heap_frame->f_executable.bits;
+    stack_frame->f_executable = heap_frame->f_executable;
     stack_frame->previous = NULL;  // No previous frame - we're the root
-    utils::py::set_funcobj(stack_frame, utils::py::get_funcobj(heap_frame));
+    stack_frame->f_funcobj = heap_frame->f_funcobj;
     stack_frame->f_globals = heap_frame->f_globals;
     stack_frame->f_builtins = heap_frame->f_builtins;
     stack_frame->f_locals = heap_frame->f_locals;
@@ -1026,26 +1251,52 @@ static PyObject *run_frame_direct(py_weakref<PyFrameObject> frame) {
 static PyObject *deserialize_frame(PyObject *self, PyObject *args, PyObject *kwargs) {
     PyObject *bytes;
     int run = 0;  // Default to False
+    int reconstruct_module = 1;
     PyObject *replace_locals = NULL;
-    static char *kwlist[] = {"frame", "replace_locals", "run", NULL};
+    static char *kwlist[] = {"frame", "replace_locals", "run", "reconstruct_module", NULL};
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|Op", kwlist, &bytes, &replace_locals, &run)) {
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwargs, "O|Opp", kwlist, &bytes, &replace_locals, &run, &reconstruct_module)) {
         return NULL;
     }
 
-    PyObject *deser_result = _deserialize_frame(bytes, run);
+    PyObject *deser_result = _deserialize_frame(bytes, false, reconstruct_module != 0);
     if (deser_result == NULL) {
         return NULL;
     }
 
     if (run) {
-        PyFrameObject *frame = (PyFrameObject*)deser_result;
-        if (!handle_replace_locals(replace_locals, frame)) {
-            Py_DECREF(frame);
+        if (!PyCapsule_CheckExact(deser_result)) {
+            Py_DECREF(deser_result);
+            PyErr_SetString(PyExc_RuntimeError, "deserialize_frame internal error: expected frame capsule.");
             return NULL;
         }
-        PyObject *result = run_and_cleanup_frame(frame);
-        Py_DECREF(frame);
+
+        frame_copy_capsule *capsule = (struct frame_copy_capsule *)PyCapsule_GetPointer(deser_result, copy_frame_capsule_name);
+        if (capsule == NULL) {
+            Py_DECREF(deser_result);
+            return NULL;
+        }
+
+        PyFrameObject *frame = capsule->frame;
+        py_weakref<PyFrameObject> frame_ref = frame;
+        if (!handle_replace_locals(replace_locals, frame_ref)) {
+            Py_DECREF(deser_result);
+            return NULL;
+        }
+
+        // Save before run_frame_direct replaces f_frame with stack-allocated frame
+        _PyInterpreterFrame *heap_interp_frame = frame->f_frame;
+        PyObject *result = run_frame_direct(frame_ref);
+
+        // Refs were shallow-copied to stack frame, so just free heap memory
+        if (capsule->owns_interpreter_frame && heap_interp_frame) {
+            free(heap_interp_frame);
+            capsule->owns_interpreter_frame = false;
+            capsule->owns_runtime_refs = false;
+        }
+
+        Py_DECREF(deser_result);
         return result;
     } else {
         // replace_locals should be applied via run_frame
@@ -1088,6 +1339,7 @@ static PyObject *run_frame(PyObject *self, PyObject *args, PyObject *kwargs) {
     if (capsule->owns_interpreter_frame && heap_interp_frame) {
         free(heap_interp_frame);
         capsule->owns_interpreter_frame = false;
+        capsule->owns_runtime_refs = false;
     }
 
     return result;
@@ -1096,11 +1348,12 @@ static PyObject *run_frame(PyObject *self, PyObject *args, PyObject *kwargs) {
 static PyObject *serialize_frame(PyObject *self, PyObject *args, PyObject *kwargs) {
     PyObject *capsule;
     PyObject *sizehint_obj = NULL;
+    int capture_module_source = 0;
     Py_ssize_t sizehint_val = 0; 
 
-    static char *kwlist[] = {"frame", "sizehint", NULL};
+    static char *kwlist[] = {"frame", "sizehint", "capture_module_source", NULL};
     // Parse capsule and sizehint_obj (as PyObject*)
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, &capsule, &sizehint_obj)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|Op", kwlist, &capsule, &sizehint_obj, &capture_module_source)) {
         return NULL;
     }
 
@@ -1115,6 +1368,7 @@ static PyObject *serialize_frame(PyObject *self, PyObject *args, PyObject *kwarg
          PyErr_SetString(PyExc_ValueError, "sizehint must be a positive integer");
          return NULL;
     }
+    ser_args.set_capture_module_source(capture_module_source != 0);
     return _serialize_frame_from_capsule(capsule, ser_args);
 }
 
@@ -1122,19 +1376,23 @@ static PyObject *copy_frame_from_greenlet(PyObject *self, PyObject *args, PyObje
     PyObject *greenlet = NULL;
     SerializationOptions options;
 
-    static char *kwlist[] = {"greenlet", "exclude_locals", "sizehint", "serialize", "exclude_dead_locals", "exclude_immutables", NULL};
+    static char *kwlist[] = {"greenlet", "exclude_locals", "sizehint", "serialize",
+                             "exclude_dead_locals", "exclude_immutables",
+                             "capture_module_source", NULL};
     int serialize = 0;
     PyObject* sizehint_obj = NULL;
     PyObject* exclude_locals = NULL;
     int exclude_dead_locals = 1;
     int exclude_immutables = 0;
+    int capture_module_source = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOppp", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOpppp", kwlist,
                                     &greenlet, &exclude_locals,
-                                    &sizehint_obj, &serialize, &exclude_dead_locals, &exclude_immutables)) {
+                                    &sizehint_obj, &serialize, &exclude_dead_locals,
+                                    &exclude_immutables, &capture_module_source)) {
         return NULL;
     }
-    options.populate(serialize, exclude_locals, exclude_dead_locals, exclude_immutables);
+    options.populate(serialize, exclude_locals, exclude_dead_locals, exclude_immutables, capture_module_source);
     if (!parse_sizehint(sizehint_obj, options.sizehint)) {
         return NULL;
     }

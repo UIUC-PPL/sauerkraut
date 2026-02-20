@@ -113,7 +113,10 @@ class CMakeBuild(build_ext):
 
         cmake_args = [
             f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={build_temp}",
-            f"-DPYTHON_EXECUTABLE={sys.executable}",
+            # Ensure CMake binds to the interpreter invoking setup.py.
+            # `find_package(Python ...)` consumes `Python_EXECUTABLE` (not `PYTHON_EXECUTABLE`).
+            f"-DPython_EXECUTABLE={sys.executable}",
+            f"-DPython3_EXECUTABLE={sys.executable}",
         ]
 
         if self._flatbuffers_dir:

@@ -2,6 +2,12 @@ import sauerkraut as skt
 from sauerkraut import liveness
 import greenlet
 import numpy as np
+import importlib
+import os
+import sys
+import tempfile
+import textwrap
+import uuid
 
 calls = 0
 
@@ -295,6 +301,81 @@ def test_resume_greenlet():
     print("Test 'resume_greenlet' passed")
 
 
+def _write_checkpoint_module(module_dir, module_name, env_key):
+    module_path = os.path.join(module_dir, f"{module_name}.py")
+    module_source = textwrap.dedent(
+        f"""
+        import os
+        import greenlet
+
+        os.environ['{env_key}'] = 'set'
+
+        def checkpoint(value):
+            greenlet.getcurrent().parent.switch()
+            return value + 1
+        """
+    )
+    with open(module_path, "w", encoding="utf-8") as f:
+        f.write(module_source)
+
+
+def test_capture_module_source_default_reconstruct():
+    env_key = f"SAUERKRAUT_CAPTURE_DEFAULT_{uuid.uuid4().hex}"
+    module_name = f"skt_capture_default_{uuid.uuid4().hex}"
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        _write_checkpoint_module(temp_dir, module_name, env_key)
+        sys.path.insert(0, temp_dir)
+        try:
+            module = importlib.import_module(module_name)
+            gr = greenlet.greenlet(module.checkpoint)
+            gr.switch(10)
+            frame_bytes = skt.copy_frame_from_greenlet(
+                gr, None, 1, True, True, False, True
+            )
+
+            os.environ.pop(env_key, None)
+            sys.modules.pop(module_name, None)
+            sys.path.remove(temp_dir)
+
+            result = skt.deserialize_frame(frame_bytes, run=True)
+            assert result == 11
+            assert os.environ.get(env_key) == "set"
+            print("Test 'capture_module_source_default_reconstruct' passed")
+        finally:
+            if temp_dir in sys.path:
+                sys.path.remove(temp_dir)
+            sys.modules.pop(module_name, None)
+            os.environ.pop(env_key, None)
+
+
+def test_capture_module_source_reconstruct_disabled():
+    env_key = f"SAUERKRAUT_CAPTURE_OFF_{uuid.uuid4().hex}"
+    module_name = f"skt_capture_disabled_{uuid.uuid4().hex}"
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        _write_checkpoint_module(temp_dir, module_name, env_key)
+        sys.path.insert(0, temp_dir)
+        try:
+            module = importlib.import_module(module_name)
+            gr = greenlet.greenlet(module.checkpoint)
+            gr.switch(10)
+            frame_bytes = skt.copy_frame_from_greenlet(
+                gr, None, 1, True, True, False, True
+            )
+
+            os.environ.pop(env_key, None)
+            result = skt.deserialize_frame(frame_bytes, run=True, reconstruct_module=False)
+            assert result == 11
+            assert os.environ.get(env_key) is None
+            print("Test 'capture_module_source_reconstruct_disabled' passed")
+        finally:
+            if temp_dir in sys.path:
+                sys.path.remove(temp_dir)
+            sys.modules.pop(module_name, None)
+            os.environ.pop(env_key, None)
+
+
 def test_liveness_basic():
     def sample_fn():
         a = 1
@@ -387,4 +468,6 @@ test_replace_locals()
 test_exclude_locals()
 test_copy_frame()
 test_resume_greenlet()
+test_capture_module_source_default_reconstruct()
+test_capture_module_source_reconstruct_disabled()
 test_liveness()
