@@ -4,6 +4,7 @@ import greenlet
 import numpy as np
 import importlib
 import os
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -376,6 +377,101 @@ def test_capture_module_source_reconstruct_disabled():
             os.environ.pop(env_key, None)
 
 
+def test_capture_module_source_cross_file():
+    env_key = f"SAUERKRAUT_CAPTURE_CROSS_{uuid.uuid4().hex}"
+    module_name = f"skt_capture_cross_{uuid.uuid4().hex}"
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        frame_path = os.path.join(temp_dir, "frame.bin")
+        module_path = os.path.join(temp_dir, f"{module_name}.py")
+        producer_path = os.path.join(temp_dir, "producer.py")
+        consumer_path = os.path.join(temp_dir, "consumer.py")
+
+        module_source = textwrap.dedent(
+            f"""
+            import os
+            import greenlet
+
+            os.environ['{env_key}'] = 'set'
+
+            def checkpoint(value):
+                token = "checkpointed"
+                greenlet.getcurrent().parent.switch()
+                return value + len(token)
+            """
+        )
+        with open(module_path, "w", encoding="utf-8") as f:
+            f.write(module_source)
+
+        producer_source = textwrap.dedent(
+            f"""
+            import importlib
+            import pathlib
+            import sys
+            import greenlet
+            import sauerkraut as skt
+
+            sys.path.insert(0, r"{temp_dir}")
+            module = importlib.import_module({module_name!r})
+            gr = greenlet.greenlet(module.checkpoint)
+            gr.switch(30)
+            frame_bytes = skt.copy_frame_from_greenlet(
+                gr, serialize=True, capture_module_source=True
+            )
+            pathlib.Path(r"{frame_path}").write_bytes(frame_bytes)
+            """
+        )
+        with open(producer_path, "w", encoding="utf-8") as f:
+            f.write(producer_source)
+
+        consumer_source = textwrap.dedent(
+            f"""
+            import os
+            import pathlib
+            import sauerkraut as skt
+
+            os.environ.pop('{env_key}', None)
+            frame_bytes = pathlib.Path(r"{frame_path}").read_bytes()
+            result = skt.deserialize_frame(frame_bytes, run=True)
+            assert result == 42
+            assert os.environ.get('{env_key}') == 'set'
+            """
+        )
+        with open(consumer_path, "w", encoding="utf-8") as f:
+            f.write(consumer_source)
+
+        env = dict(os.environ)
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        existing_pythonpath = env.get("PYTHONPATH")
+        if existing_pythonpath:
+            env["PYTHONPATH"] = f"{project_root}:{existing_pythonpath}"
+        else:
+            env["PYTHONPATH"] = project_root
+
+        producer = subprocess.run(
+            [sys.executable, producer_path], env=env, capture_output=True, text=True
+        )
+        assert producer.returncode == 0, (
+            "Producer failed\nstdout:\n"
+            + producer.stdout
+            + "\nstderr:\n"
+            + producer.stderr
+        )
+
+        os.remove(module_path)
+
+        consumer = subprocess.run(
+            [sys.executable, consumer_path], env=env, capture_output=True, text=True
+        )
+        assert consumer.returncode == 0, (
+            "Consumer failed\nstdout:\n"
+            + consumer.stdout
+            + "\nstderr:\n"
+            + consumer.stderr
+        )
+        print("Test 'capture_module_source_cross_file' passed")
+
+
 def test_liveness_basic():
     def sample_fn():
         a = 1
@@ -470,4 +566,5 @@ test_copy_frame()
 test_resume_greenlet()
 test_capture_module_source_default_reconstruct()
 test_capture_module_source_reconstruct_disabled()
+test_capture_module_source_cross_file()
 test_liveness()
