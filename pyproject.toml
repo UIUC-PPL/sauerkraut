@@ -29,6 +29,8 @@ classifiers = [
 dependencies = [
     "bytecode @ git+https://github.com/ZwFink/bytecode.git",
     "numpy",
+    "dill",
+    "greenlet",
 ]
 
 [project.urls]
