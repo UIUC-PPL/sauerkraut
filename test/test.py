@@ -441,12 +441,6 @@ def test_capture_module_source_cross_file():
             f.write(consumer_source)
 
         env = dict(os.environ)
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        existing_pythonpath = env.get("PYTHONPATH")
-        if existing_pythonpath:
-            env["PYTHONPATH"] = f"{project_root}:{existing_pythonpath}"
-        else:
-            env["PYTHONPATH"] = project_root
 
         producer = subprocess.run(
             [sys.executable, producer_path], env=env, capture_output=True, text=True
