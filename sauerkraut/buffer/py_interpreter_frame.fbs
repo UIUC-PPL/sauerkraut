@@ -26,6 +26,10 @@ table PyInterpreterFrame {
   locals_plus:[PyObject];
   locals_exclusion_bitmask:[uint8];
   stack:[PyObject]; // this is not in the Python definition, but we need to capture the stack.
+  module_name:string;
+  module_package:string;
+  module_filename:string;
+  module_source:[uint8];
 }
 
 root_type PyInterpreterFrame;
