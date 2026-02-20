@@ -472,6 +472,7 @@ struct SerializationOptions {
     Py_ssize_t sizehint = 0;
     bool exclude_dead_locals = true;
     bool exclude_immutables = false;
+    bool capture_module_source = false;
 
     serdes::SerializationArgs to_ser_args() const {
         serdes::SerializationArgs args;
@@ -479,14 +480,17 @@ struct SerializationOptions {
             args.set_sizehint(sizehint);
         }
         args.set_exclude_immutables(exclude_immutables);
+        args.set_capture_module_source(capture_module_source);
         return args;
     }
 
     void populate(int serialize_int, PyObject* exclude_locals_obj,
-                  int exclude_dead_locals_int, int exclude_immutables_int) {
+                  int exclude_dead_locals_int, int exclude_immutables_int,
+                  int capture_module_source_int) {
         serialize = (serialize_int != 0);
         exclude_dead_locals = (exclude_dead_locals_int != 0);
         exclude_immutables = (exclude_immutables_int != 0);
+        capture_module_source = (capture_module_source_int != 0);
         exclude_locals = pyobject_strongref(exclude_locals_obj);
     }
 };
@@ -613,21 +617,23 @@ static bool parse_sizehint(PyObject* sizehint_obj, Py_ssize_t& sizehint) {
 static bool parse_serialization_options(PyObject* args, PyObject* kwargs, SerializationOptions& options) {
     static char* kwlist[] = {"serialize", "exclude_locals",
                              "exclude_immutables", "sizehint",
-                             "exclude_dead_locals", NULL};
+                             "exclude_dead_locals", "capture_module_source", NULL};
     int serialize = 0;
     PyObject* sizehint_obj = NULL;
     PyObject* exclude_locals = NULL;
     int exclude_dead_locals = 1;
     int exclude_immutables = 0;
+    int capture_module_source = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|pOpOp", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|pOpOpp", kwlist,
                                     &serialize, &exclude_locals,
                                     &exclude_immutables, &sizehint_obj,
-                                    &exclude_dead_locals)) {
+                                    &exclude_dead_locals, &capture_module_source)) {
         return false;
     }
 
-    options.populate(serialize, exclude_locals, exclude_dead_locals, exclude_immutables);
+    options.populate(
+        serialize, exclude_locals, exclude_dead_locals, exclude_immutables, capture_module_source);
     return parse_sizehint(sizehint_obj, options.sizehint);
 }
 
@@ -659,19 +665,23 @@ static PyObject *copy_frame(PyObject *self, PyObject *args, PyObject *kwargs) {
     SerializationOptions options;
 
     static char *kwlist[] = {"frame", "exclude_locals", "sizehint",
-                             "serialize", "exclude_dead_locals", "exclude_immutables", NULL};
+                             "serialize", "exclude_dead_locals", "exclude_immutables",
+                             "capture_module_source", NULL};
     int serialize = 0;
     PyObject* sizehint_obj = NULL;
     PyObject* exclude_locals = NULL;
     int exclude_dead_locals = 1;
     int exclude_immutables = 0;
+    int capture_module_source = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOppp", kwlist,
-                                    &frame, &exclude_locals, &sizehint_obj, &serialize, &exclude_dead_locals, &exclude_immutables)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOpppp", kwlist,
+                                    &frame, &exclude_locals, &sizehint_obj, &serialize,
+                                    &exclude_dead_locals, &exclude_immutables,
+                                    &capture_module_source)) {
         return NULL;
     }
 
-    options.populate(serialize, exclude_locals, exclude_dead_locals, exclude_immutables);
+    options.populate(serialize, exclude_locals, exclude_dead_locals, exclude_immutables, capture_module_source);
     if (!parse_sizehint(sizehint_obj, options.sizehint)) {
         return NULL;
     }
@@ -729,7 +739,156 @@ static PyObject *copy_frame(PyObject *self, PyObject *args, PyObject *kwargs) {
 //     return _copy_run_frame_from_capsule(capsule);
 // }
 
+static bool set_optional_utf8_from_value(
+    PyObject *value, const char *field_name, std::optional<std::string>& output, bool required=false) {
+    if (value == NULL || value == Py_None) {
+        if (required) {
+            PyErr_Format(PyExc_RuntimeError, "Missing required module metadata field '%s'.", field_name);
+            return false;
+        }
+        return true;
+    }
+
+    if (!PyUnicode_Check(value)) {
+        PyErr_Format(PyExc_TypeError, "Module metadata field '%s' must be a string.", field_name);
+        return false;
+    }
+
+    Py_ssize_t size = 0;
+    const char *utf8 = PyUnicode_AsUTF8AndSize(value, &size);
+    if (utf8 == NULL) {
+        return false;
+    }
+    output = std::string(utf8, size);
+    return true;
+}
+
+static pyobject_strongref get_module_source_text(PyObject *module_obj, PyObject *module_name_obj) {
+    auto inspect_module = pyobject_strongref::steal(PyImport_ImportModule("inspect"));
+    if (inspect_module) {
+        auto getsource_fn = pyobject_strongref::steal(
+            PyObject_GetAttrString(inspect_module.borrow(), "getsource"));
+        if (getsource_fn) {
+            auto source_obj = pyobject_strongref::steal(
+                PyObject_CallOneArg(getsource_fn.borrow(), module_obj));
+            if (source_obj) {
+                if (!PyUnicode_Check(source_obj.borrow())) {
+                    PyErr_SetString(PyExc_TypeError, "inspect.getsource returned a non-string value.");
+                    return pyobject_strongref(NULL);
+                }
+                return source_obj;
+            }
+        }
+    }
+    PyErr_Clear();
+
+    auto module_spec = pyobject_strongref::steal(PyObject_GetAttrString(module_obj, "__spec__"));
+    if (module_spec && module_spec.borrow() != Py_None) {
+        auto loader = pyobject_strongref::steal(PyObject_GetAttrString(module_spec.borrow(), "loader"));
+        if (loader && loader.borrow() != Py_None) {
+            auto get_source_fn = pyobject_strongref::steal(
+                PyObject_GetAttrString(loader.borrow(), "get_source"));
+            if (get_source_fn) {
+                auto source_obj = pyobject_strongref::steal(
+                    PyObject_CallOneArg(get_source_fn.borrow(), module_name_obj));
+                if (source_obj && source_obj.borrow() != Py_None) {
+                    if (!PyUnicode_Check(source_obj.borrow())) {
+                        PyErr_SetString(PyExc_TypeError, "loader.get_source returned a non-string value.");
+                        return pyobject_strongref(NULL);
+                    }
+                    return source_obj;
+                }
+            }
+        }
+    }
+    PyErr_Clear();
+    return pyobject_strongref(NULL);
+}
+
+static bool populate_module_capture_metadata(frame_copy_capsule *copy_capsule, serdes::SerializationArgs& args) {
+    if (!args.capture_module_source) {
+        return true;
+    }
+
+    if (copy_capsule == NULL || copy_capsule->frame == NULL ||
+        copy_capsule->frame->f_frame == NULL || copy_capsule->frame->f_frame->f_globals == NULL) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "capture_module_source=True requires a frame with valid globals.");
+        return false;
+    }
+
+    PyObject *globals = copy_capsule->frame->f_frame->f_globals;
+    if (!PyDict_Check(globals)) {
+        PyErr_SetString(PyExc_RuntimeError, "capture_module_source=True requires dictionary globals.");
+        return false;
+    }
+
+    auto module_name_obj = PyDict_GetItemString(globals, "__name__");
+    std::optional<std::string> module_name;
+    if (!set_optional_utf8_from_value(module_name_obj, "__name__", module_name, true)) {
+        return false;
+    }
+
+    std::optional<std::string> module_package;
+    if (!set_optional_utf8_from_value(PyDict_GetItemString(globals, "__package__"), "__package__", module_package)) {
+        return false;
+    }
+
+    std::optional<std::string> module_filename;
+    if (!set_optional_utf8_from_value(PyDict_GetItemString(globals, "__file__"), "__file__", module_filename)) {
+        return false;
+    }
+
+    auto sys_module = pyobject_strongref::steal(PyImport_ImportModule("sys"));
+    if (!sys_module) {
+        return false;
+    }
+    auto modules_dict = pyobject_strongref::steal(PyObject_GetAttrString(sys_module.borrow(), "modules"));
+    if (!modules_dict || !PyDict_Check(modules_dict.borrow())) {
+        PyErr_SetString(PyExc_RuntimeError, "Failed to read sys.modules while capturing module source.");
+        return false;
+    }
+
+    auto module_obj_raw = PyDict_GetItem(modules_dict.borrow(), module_name_obj);
+    if (module_obj_raw == NULL) {
+        PyErr_Format(PyExc_RuntimeError,
+            "capture_module_source=True could not find module '%s' in sys.modules.",
+            module_name.value().c_str());
+        return false;
+    }
+
+    auto module_obj = pyobject_strongref(module_obj_raw);
+    auto source_obj = get_module_source_text(module_obj.borrow(), module_name_obj);
+    if (!source_obj) {
+        if (!PyErr_Occurred()) {
+            PyErr_Format(PyExc_RuntimeError,
+                "capture_module_source=True could not retrieve source for module '%s'.",
+                module_name.value().c_str());
+        }
+        return false;
+    }
+
+    Py_ssize_t source_size = 0;
+    const char *source_utf8 = PyUnicode_AsUTF8AndSize(source_obj.borrow(), &source_size);
+    if (source_utf8 == NULL) {
+        return false;
+    }
+
+    std::vector<uint8_t> module_source(
+        reinterpret_cast<const uint8_t*>(source_utf8),
+        reinterpret_cast<const uint8_t*>(source_utf8) + source_size);
+    args.set_module_name(std::move(module_name));
+    args.set_module_package(std::move(module_package));
+    args.set_module_filename(std::move(module_filename));
+    args.set_module_source(std::move(module_source));
+    return true;
+}
+
 static PyObject *_serialize_frame_direct_from_capsule(frame_copy_capsule *copy_capsule, serdes::SerializationArgs args) {
+    if (!populate_module_capture_metadata(copy_capsule, args)) {
+        return NULL;
+    }
+
     loads_functor loads(sauerkraut_state->pickle_loads, sauerkraut_state->dill_loads);
     dumps_functor dumps(sauerkraut_state->pickle_dumps, sauerkraut_state->dill_dumps);
 
@@ -739,6 +898,9 @@ static PyObject *_serialize_frame_direct_from_capsule(frame_copy_capsule *copy_c
     serdes::PyFrameSerdes frame_serdes{po_serdes};
 
     auto serialized_frame = frame_serdes.serialize(builder, *(static_cast<sauerkraut::PyFrame*>(copy_capsule->frame)), args);
+    if (PyErr_Occurred()) {
+        return NULL;
+    }
     builder.Finish(serialized_frame);
     auto buf = builder.GetBufferPointer();
     auto size = builder.GetSize();
@@ -858,6 +1020,31 @@ static PyFrameObject *create_pyframe_object(serdes::DeserializedPyFrame& frame_o
     return frame;
 }
 
+static PyObject *get_module_globals_from_sys_modules(const std::optional<std::string>& module_name) {
+    if (!module_name.has_value()) {
+        return NULL;
+    }
+
+    auto sys_module = pyobject_strongref::steal(PyImport_ImportModule("sys"));
+    if (!sys_module) {
+        PyErr_Clear();
+        return NULL;
+    }
+
+    auto modules = pyobject_strongref::steal(PyObject_GetAttrString(sys_module.borrow(), "modules"));
+    if (!modules || !PyDict_Check(modules.borrow())) {
+        PyErr_Clear();
+        return NULL;
+    }
+
+    PyObject *module_obj = PyDict_GetItemString(modules.borrow(), module_name.value().c_str());
+    if (module_obj == NULL || !PyModule_Check(module_obj)) {
+        return NULL;
+    }
+
+    return PyModule_GetDict(module_obj);
+}
+
 static void init_pyinterpreterframe(sauerkraut::PyInterpreterFrame *interp_frame, 
                                    serdes::DeserializedPyInterpreterFrame& frame_obj,
                                    py_weakref<PyFrameObject> frame,
@@ -874,10 +1061,22 @@ static void init_pyinterpreterframe(sauerkraut::PyInterpreterFrame *interp_frame
         } else {
             utils::py::set_funcobj(interp_frame, NULL);
         }
+
         if(NULL != *frame_obj.f_globals) {
             interp_frame->f_globals = Py_NewRef(frame_obj.f_globals.borrow());
         } else {
-            interp_frame->f_globals = Py_NewRef(PyEval_GetFrameGlobals());
+            PyObject *stable_globals = get_module_globals_from_sys_modules(frame_obj.module_name);
+            if (stable_globals == NULL) {
+                PyObject *funcobj = utils::py::get_funcobj(interp_frame);
+                if (funcobj != NULL && PyFunction_Check(funcobj)) {
+                    stable_globals = PyFunction_GetGlobals(funcobj);
+                }
+            }
+            if (stable_globals != NULL) {
+                interp_frame->f_globals = Py_NewRef(stable_globals);
+            } else {
+                interp_frame->f_globals = Py_NewRef(PyEval_GetFrameGlobals());
+            }
         }
     } else {
         auto invariants = sauerkraut_state->get_code_immutables(frame_obj);
@@ -946,7 +1145,7 @@ static sauerkraut::PyInterpreterFrame *create_pyinterpreterframe_object(serdes::
     return interp_frame;
 }
 
-static PyObject *_deserialize_frame(PyObject *bytes, bool inplace=false) {
+static PyObject *_deserialize_frame(PyObject *bytes, bool inplace=false, bool reconstruct_module=true) {
     if(PyErr_Occurred()) {
         PyErr_Print();
         return NULL;
@@ -959,7 +1158,10 @@ static PyObject *_deserialize_frame(PyObject *bytes, bool inplace=false) {
     uint8_t *data = (uint8_t *)PyBytes_AsString(bytes);
 
     auto serframe = pyframe_buffer::GetPyFrame(data);
-    auto deserframe = frame_serdes.deserialize(serframe);
+    auto deserframe = frame_serdes.deserialize(serframe, reconstruct_module);
+    if (PyErr_Occurred()) {
+        return NULL;
+    }
 
     assert(deserframe.f_frame.owner == 0);
     pycode_strongref code;
@@ -1044,14 +1246,16 @@ static PyObject *run_frame_direct(py_weakref<PyFrameObject> frame) {
 static PyObject *deserialize_frame(PyObject *self, PyObject *args, PyObject *kwargs) {
     PyObject *bytes;
     int run = 0;  // Default to False
+    int reconstruct_module = 1;
     PyObject *replace_locals = NULL;
-    static char *kwlist[] = {"frame", "replace_locals", "run", NULL};
+    static char *kwlist[] = {"frame", "replace_locals", "run", "reconstruct_module", NULL};
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|Op", kwlist, &bytes, &replace_locals, &run)) {
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwargs, "O|Opp", kwlist, &bytes, &replace_locals, &run, &reconstruct_module)) {
         return NULL;
     }
 
-    PyObject *deser_result = _deserialize_frame(bytes, false);
+    PyObject *deser_result = _deserialize_frame(bytes, false, reconstruct_module != 0);
     if (deser_result == NULL) {
         return NULL;
     }
@@ -1136,11 +1340,12 @@ static PyObject *run_frame(PyObject *self, PyObject *args, PyObject *kwargs) {
 static PyObject *serialize_frame(PyObject *self, PyObject *args, PyObject *kwargs) {
     PyObject *capsule;
     PyObject *sizehint_obj = NULL;
+    int capture_module_source = 0;
     Py_ssize_t sizehint_val = 0; 
 
-    static char *kwlist[] = {"frame", "sizehint", NULL};
+    static char *kwlist[] = {"frame", "sizehint", "capture_module_source", NULL};
     // Parse capsule and sizehint_obj (as PyObject*)
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, &capsule, &sizehint_obj)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|Op", kwlist, &capsule, &sizehint_obj, &capture_module_source)) {
         return NULL;
     }
 
@@ -1155,6 +1360,7 @@ static PyObject *serialize_frame(PyObject *self, PyObject *args, PyObject *kwarg
          PyErr_SetString(PyExc_ValueError, "sizehint must be a positive integer");
          return NULL;
     }
+    ser_args.set_capture_module_source(capture_module_source != 0);
     return _serialize_frame_from_capsule(capsule, ser_args);
 }
 
@@ -1162,19 +1368,23 @@ static PyObject *copy_frame_from_greenlet(PyObject *self, PyObject *args, PyObje
     PyObject *greenlet = NULL;
     SerializationOptions options;
 
-    static char *kwlist[] = {"greenlet", "exclude_locals", "sizehint", "serialize", "exclude_dead_locals", "exclude_immutables", NULL};
+    static char *kwlist[] = {"greenlet", "exclude_locals", "sizehint", "serialize",
+                             "exclude_dead_locals", "exclude_immutables",
+                             "capture_module_source", NULL};
     int serialize = 0;
     PyObject* sizehint_obj = NULL;
     PyObject* exclude_locals = NULL;
     int exclude_dead_locals = 1;
     int exclude_immutables = 0;
+    int capture_module_source = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOppp", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOpppp", kwlist,
                                     &greenlet, &exclude_locals,
-                                    &sizehint_obj, &serialize, &exclude_dead_locals, &exclude_immutables)) {
+                                    &sizehint_obj, &serialize, &exclude_dead_locals,
+                                    &exclude_immutables, &capture_module_source)) {
         return NULL;
     }
-    options.populate(serialize, exclude_locals, exclude_dead_locals, exclude_immutables);
+    options.populate(serialize, exclude_locals, exclude_dead_locals, exclude_immutables, capture_module_source);
     if (!parse_sizehint(sizehint_obj, options.sizehint)) {
         return NULL;
     }

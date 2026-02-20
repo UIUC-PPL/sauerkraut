@@ -3,6 +3,7 @@
 #include "sauerkraut_cpython_compat.h"
 #include <iostream>
 #include <optional>
+#include <string>
 #include "flatbuffers/flatbuffers.h"
 #include "py_object_generated.h"
 #include "py_var_object_head_generated.h"
@@ -20,12 +21,17 @@ namespace serdes {
         public:
         std::optional<utils::py::LocalExclusionBitmask> exclude_locals;
         bool exclude_immutables = false;
+        bool capture_module_source = false;
         size_t sizehint;
+        std::optional<std::string> module_name;
+        std::optional<std::string> module_package;
+        std::optional<std::string> module_filename;
+        std::optional<std::vector<uint8_t>> module_source;
 
-        SerializationArgs(std::optional<utils::py::LocalExclusionBitmask> exclude_locals, bool exclude_immutables, size_t sizehint) :
-            exclude_locals(exclude_locals), exclude_immutables(exclude_immutables), sizehint(sizehint) {}
-        SerializationArgs() : exclude_locals(std::nullopt), exclude_immutables(false), sizehint(SERIALIZATION_SIZEHINT_DEFAULT) {}
-        SerializationArgs(size_t sizehint) : exclude_locals(std::nullopt), exclude_immutables(false), sizehint(sizehint) {}
+        SerializationArgs(std::optional<utils::py::LocalExclusionBitmask> exclude_locals, bool exclude_immutables, bool capture_module_source, size_t sizehint) :
+            exclude_locals(exclude_locals), exclude_immutables(exclude_immutables), capture_module_source(capture_module_source), sizehint(sizehint) {}
+        SerializationArgs() : exclude_locals(std::nullopt), exclude_immutables(false), capture_module_source(false), sizehint(SERIALIZATION_SIZEHINT_DEFAULT) {}
+        SerializationArgs(size_t sizehint) : exclude_locals(std::nullopt), exclude_immutables(false), capture_module_source(false), sizehint(sizehint) {}
 
         void set_exclude_locals(std::optional<utils::py::LocalExclusionBitmask> exclude_locals) {
             this->exclude_locals = exclude_locals;
@@ -35,8 +41,28 @@ namespace serdes {
             this->exclude_immutables = exclude_immutables;
         }
 
+        void set_capture_module_source(bool capture_module_source) {
+            this->capture_module_source = capture_module_source;
+        }
+
         void set_sizehint(size_t sizehint) {
             this->sizehint = sizehint;
+        }
+
+        void set_module_name(std::optional<std::string> module_name) {
+            this->module_name = std::move(module_name);
+        }
+
+        void set_module_package(std::optional<std::string> module_package) {
+            this->module_package = std::move(module_package);
+        }
+
+        void set_module_filename(std::optional<std::string> module_filename) {
+            this->module_filename = std::move(module_filename);
+        }
+
+        void set_module_source(std::optional<std::vector<uint8_t>> module_source) {
+            this->module_source = std::move(module_source);
         }
     };
     
@@ -53,12 +79,12 @@ namespace serdes {
             offsets::PyObjectOffset serialize(Builder &builder, PyObject *obj) {
                 auto dumps_result = dumps(obj);
                 if(NULL == dumps_result.borrow()) {
-                    PyErr_Print();
+                    return 0;
                 }
                 Py_ssize_t size = 0;
                 char *pickled_data;
                 if(PyBytes_AsStringAndSize(*dumps_result, &pickled_data, &size) == -1) {
-                    PyErr_Print();
+                    return 0;
                 }
                 auto bytes = builder.CreateVector((const uint8_t *)pickled_data, size);
                 auto py_obj = pyframe_buffer::CreatePyObject(builder, bytes);
@@ -86,12 +112,12 @@ namespace serdes {
             offsets::PyObjectOffset serialize_dill(Builder &builder, PyObject *obj) {
                 auto dumps_result = dumps.dill_dumps(obj);
                 if(NULL == dumps_result.borrow()) {
-                    PyErr_Print();
+                    return 0;
                 }
                 Py_ssize_t size = 0;
                 char *pickled_data;
                 if(PyBytes_AsStringAndSize(*dumps_result, &pickled_data, &size) == -1) {
-                    PyErr_Print();
+                    return 0;
                 }
                 
                 auto bytes = builder.CreateVector((const uint8_t *)pickled_data, size);
@@ -395,6 +421,9 @@ namespace serdes {
 
         std::vector<pyobject_strongref> localsplus;
         std::vector<pyobject_strongref> stack;
+        std::optional<std::string> module_name;
+        std::optional<std::string> module_package;
+        std::optional<std::string> module_filename;
 
     };
 
@@ -402,6 +431,107 @@ namespace serdes {
     class PyInterpreterFrameSerdes {
         PyObjectSerializer po_serializer;
         PyCodeObjectSerdes<PyObjectSerializer> code_serializer;
+
+        static bool set_dict_string(PyObject *dict, const char *key, const flatbuffers::String *value) {
+            if (value == NULL) {
+                return true;
+            }
+            auto py_value = pyobject_strongref::steal(
+                PyUnicode_DecodeUTF8(value->c_str(), value->size(), NULL));
+            if (!py_value) {
+                return false;
+            }
+            return PyDict_SetItemString(dict, key, py_value.borrow()) == 0;
+        }
+
+        static bool bootstrap_module_globals(const pyframe_buffer::PyInterpreterFrame *obj) {
+            auto source = obj->module_source();
+            if (source == NULL) {
+                return true;
+            }
+
+            auto module_name_field = obj->module_name();
+            std::string module_name = "__sauerkraut_snapshot__";
+            if (module_name_field != NULL) {
+                module_name = std::string(module_name_field->c_str(), module_name_field->size());
+            }
+
+            auto module_filename_field = obj->module_filename();
+            std::string compile_filename = "<sauerkraut_snapshot>";
+            if (module_filename_field != NULL) {
+                compile_filename = std::string(module_filename_field->c_str(), module_filename_field->size());
+            } else if (module_name_field != NULL) {
+                compile_filename = module_name;
+            }
+
+            pyobject_strongref globals_dict;
+            if (module_name_field != NULL) {
+                auto sys_module = pyobject_strongref::steal(PyImport_ImportModule("sys"));
+                if (!sys_module) {
+                    return false;
+                }
+                auto modules_dict = pyobject_strongref::steal(
+                    PyObject_GetAttrString(sys_module.borrow(), "modules"));
+                if (!modules_dict || !PyDict_Check(modules_dict.borrow())) {
+                    PyErr_SetString(PyExc_RuntimeError, "Failed to access sys.modules during module reconstruction.");
+                    return false;
+                }
+
+                auto module_obj = pyobject_strongref::steal(PyModule_New(module_name.c_str()));
+                if (!module_obj) {
+                    return false;
+                }
+                if (PyDict_SetItemString(modules_dict.borrow(), module_name.c_str(), module_obj.borrow()) < 0) {
+                    return false;
+                }
+                globals_dict = pyobject_strongref(PyModule_GetDict(module_obj.borrow()));
+            } else {
+                globals_dict = pyobject_strongref::steal(PyDict_New());
+            }
+
+            if (!globals_dict) {
+                return false;
+            }
+
+            if (PyDict_SetItemString(globals_dict.borrow(), "__builtins__", PyEval_GetBuiltins()) < 0) {
+                return false;
+            }
+
+            if (module_name_field != NULL) {
+                if (!set_dict_string(globals_dict.borrow(), "__name__", module_name_field)) {
+                    return false;
+                }
+            } else {
+                auto module_name_obj = pyobject_strongref::steal(PyUnicode_FromString(module_name.c_str()));
+                if (!module_name_obj) {
+                    return false;
+                }
+                if (PyDict_SetItemString(globals_dict.borrow(), "__name__", module_name_obj.borrow()) < 0) {
+                    return false;
+                }
+            }
+
+            if (!set_dict_string(globals_dict.borrow(), "__package__", obj->module_package())) {
+                return false;
+            }
+            if (!set_dict_string(globals_dict.borrow(), "__file__", obj->module_filename())) {
+                return false;
+            }
+
+            std::string source_text(reinterpret_cast<const char*>(source->data()), source->size());
+            auto code_obj = pyobject_strongref::steal(
+                Py_CompileString(source_text.c_str(), compile_filename.c_str(), Py_file_input));
+            if (!code_obj) {
+                return false;
+            }
+
+            auto eval_result = pyobject_strongref::steal(
+                PyEval_EvalCode(code_obj.borrow(), globals_dict.borrow(), globals_dict.borrow()));
+            if (!eval_result) {
+                return false;
+            }
+            return true;
+        }
 
         template <typename Builder>
         flatbuffers::Offset<flatbuffers::Vector<offsets::PyObjectOffset>> serialize_stack(Builder &builder, sauerkraut::PyInterpreterFrame &obj, int stack_depth) {
@@ -502,6 +632,14 @@ namespace serdes {
 
             auto fast_locals_result = serialize_fast_locals_plus(builder, obj, ser_args);
             auto stack_ser = serialize_stack(builder, obj, stack_depth);
+            auto module_name_ser = ser_args.module_name ?
+                std::optional{builder.CreateString(ser_args.module_name.value())} : std::nullopt;
+            auto module_package_ser = ser_args.module_package ?
+                std::optional{builder.CreateString(ser_args.module_package.value())} : std::nullopt;
+            auto module_filename_ser = ser_args.module_filename ?
+                std::optional{builder.CreateString(ser_args.module_filename.value())} : std::nullopt;
+            auto module_source_ser = ser_args.module_source ?
+                std::optional{builder.CreateVector(ser_args.module_source.value())} : std::nullopt;
 
             pyframe_buffer::PyInterpreterFrameBuilder frame_builder(builder);
 
@@ -522,13 +660,42 @@ namespace serdes {
             frame_builder.add_locals_plus(fast_locals_result.first);
             frame_builder.add_locals_exclusion_bitmask(fast_locals_result.second);
             frame_builder.add_stack(stack_ser);
+            if (module_name_ser) {
+                frame_builder.add_module_name(module_name_ser.value());
+            }
+            if (module_package_ser) {
+                frame_builder.add_module_package(module_package_ser.value());
+            }
+            if (module_filename_ser) {
+                frame_builder.add_module_filename(module_filename_ser.value());
+            }
+            if (module_source_ser) {
+                frame_builder.add_module_source(module_source_ser.value());
+            }
 
             return frame_builder.Finish();
 
         }
 
-        DeserializedPyInterpreterFrame deserialize(const pyframe_buffer::PyInterpreterFrame *obj) {
+        DeserializedPyInterpreterFrame deserialize(const pyframe_buffer::PyInterpreterFrame *obj, bool reconstruct_module=true) {
             DeserializedPyInterpreterFrame deser;
+            if (obj->module_name()) {
+                deser.module_name = std::string(obj->module_name()->c_str(), obj->module_name()->size());
+            }
+            if (obj->module_package()) {
+                deser.module_package = std::string(obj->module_package()->c_str(), obj->module_package()->size());
+            }
+            if (obj->module_filename()) {
+                deser.module_filename = std::string(obj->module_filename()->c_str(), obj->module_filename()->size());
+            }
+            if (reconstruct_module && obj->module_source()) {
+                if (!bootstrap_module_globals(obj)) {
+                    if (!PyErr_Occurred()) {
+                        PyErr_SetString(PyExc_RuntimeError, "Failed to reconstruct module source during frame deserialization.");
+                    }
+                    return deser;
+                }
+            }
             if(obj->f_executable()) {
                 deser.f_executable = code_serializer.deserialize(obj->f_executable());
             }
@@ -547,6 +714,10 @@ namespace serdes {
 
             auto localsplus = obj->locals_plus();
             auto exclusion_bitmask = obj->locals_exclusion_bitmask();
+            if (localsplus == NULL || exclusion_bitmask == NULL) {
+                PyErr_SetString(PyExc_RuntimeError, "Serialized frame is missing locals metadata.");
+                return deser;
+            }
 
             int total_locals = exclusion_bitmask->size();
             deser.localsplus.reserve(total_locals);
@@ -563,6 +734,10 @@ namespace serdes {
             }
 
             auto stack = obj->stack();
+            if (stack == NULL) {
+                PyErr_SetString(PyExc_RuntimeError, "Serialized frame is missing stack metadata.");
+                return deser;
+            }
             deser.stack.reserve(stack->size());
             for(auto stack_obj : *stack) {
                 deser.stack.push_back(po_serializer.deserialize(stack_obj));
@@ -632,12 +807,12 @@ namespace serdes {
                 return frame_builder.Finish();
             }
 
-            DeserializedPyFrame deserialize(const pyframe_buffer::PyFrame *obj) {
+            DeserializedPyFrame deserialize(const pyframe_buffer::PyFrame *obj, bool reconstruct_module=true) {
                 // auto ob_base_deser = poh_serializer.deserialize(obj->ob_base());
                 DeserializedPyFrame deser;
                 PyInterpreterFrameSerdes interpreter_frame_serializer(po_serializer);
 
-                deser.f_frame = interpreter_frame_serializer.deserialize(obj->f_frame());
+                deser.f_frame = interpreter_frame_serializer.deserialize(obj->f_frame(), reconstruct_module);
 
                 deser.f_trace = po_serializer.deserialize(obj->f_trace());
 
