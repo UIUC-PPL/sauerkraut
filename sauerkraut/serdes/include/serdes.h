@@ -428,7 +428,8 @@ namespace serdes {
         std::pair<flatbuffers::Offset<flatbuffers::Vector<offsets::PyObjectOffset>>, 
                   flatbuffers::Offset<flatbuffers::Vector<uint8_t>>> 
         serialize_fast_locals_plus(Builder &builder, sauerkraut::PyInterpreterFrame &obj, serdes::SerializationArgs& ser_args) {
-            auto n_locals = utils::py::get_code_nlocals((PyCodeObject*)obj.f_executable.bits);
+            auto n_locals = utils::py::get_code_nlocals(
+                (PyCodeObject*)utils::py::stackref_as_pyobject(obj.f_executable));
             auto exclude_local_bitmask = ser_args.exclude_locals.value_or(std::vector<bool>(n_locals, false));
             std::vector<offsets::PyObjectOffset> localsplus;
 
@@ -485,7 +486,8 @@ namespace serdes {
             offsets::PyObjectOffset f_globals_ser = 0;
             bool has_f_funcobj = false;
 
-            f_executable_ser = code_serializer.serialize(builder, (PyCodeObject*)obj.f_executable.bits, ser_args);
+            f_executable_ser = code_serializer.serialize(
+                builder, (PyCodeObject*)utils::py::stackref_as_pyobject(obj.f_executable), ser_args);
             if(!ser_args.exclude_immutables) {
                 PyObject *func_obj = utils::py::get_funcobj(&obj);
                 if (func_obj != NULL) {
