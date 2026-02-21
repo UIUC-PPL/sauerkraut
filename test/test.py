@@ -1,5 +1,4 @@
 import sauerkraut as skt
-from sauerkraut import liveness
 import greenlet
 import numpy as np
 import importlib
@@ -11,6 +10,28 @@ import textwrap
 import uuid
 
 calls = 0
+_CUPY = None
+
+
+def _get_cupy_with_gpu_or_none():
+    global _CUPY
+    try:
+        import cupy as cp
+    except Exception:
+        print("Skipping CuPy tests: CuPy is not installed")
+        return None
+
+    try:
+        gpu_count = cp.cuda.runtime.getDeviceCount()
+    except Exception:
+        print("Skipping CuPy tests: failed to query GPU count")
+        return None
+
+    if gpu_count < 1:
+        print("Skipping CuPy tests: no GPUs available")
+        return None
+    _CUPY = cp
+    return cp
 
 
 def test1_fn(c):
@@ -467,6 +488,8 @@ def test_capture_module_source_cross_file():
 
 
 def test_liveness_basic():
+    from sauerkraut import liveness
+
     def sample_fn():
         a = 1
         b = 2
@@ -486,6 +509,8 @@ def test_liveness_basic():
 
 
 def test_liveness_dead_variables():
+    from sauerkraut import liveness
+
     def fn_with_dead():
         x = 1
         y = 2
@@ -502,6 +527,8 @@ def test_liveness_dead_variables():
 
 
 def test_liveness_module_function():
+    from sauerkraut import liveness
+
     def cached_fn():
         a = 10
         b = 20
@@ -517,6 +544,8 @@ def test_liveness_module_function():
 
 
 def test_liveness_invalid_offset():
+    from sauerkraut import liveness
+
     def simple_fn():
         return 1
 
@@ -530,6 +559,8 @@ def test_liveness_invalid_offset():
 
 
 def test_liveness_loop():
+    from sauerkraut import liveness
+
     def loop_fn():
         total = 0
         for i in range(5):
@@ -550,15 +581,159 @@ def test_liveness():
     test_liveness_loop()
 
 
-test_copy_then_serialize()
-test_combined_copy_serialize()
-test_for_loop()
-test_greenlet()
-test_replace_locals()
-test_exclude_locals()
-test_copy_frame()
-test_resume_greenlet()
-test_capture_module_source_default_reconstruct()
-test_capture_module_source_reconstruct_disabled()
-test_capture_module_source_cross_file()
-test_liveness()
+def _cupy_local_roundtrip_fn(base):
+    cp = _CUPY
+    assert cp is not None
+
+    arr = cp.arange(6, dtype=cp.float32).reshape(2, 3) + base
+    source_device = arr.device.id
+    greenlet.getcurrent().parent.switch()
+    assert isinstance(arr, cp.ndarray)
+    assert arr.device.id == source_device
+    arr = arr + 2
+    return float(cp.asnumpy(arr).sum())
+
+
+def test_cupy_local_roundtrip():
+    cp = _get_cupy_with_gpu_or_none()
+    if cp is None:
+        return
+
+    gr = greenlet.greenlet(_cupy_local_roundtrip_fn)
+    gr.switch(3.0)
+    serframe = skt.copy_frame_from_greenlet(gr, serialize=True)
+    result = skt.deserialize_frame(serframe, run=True)
+    expected = float(cp.asnumpy(cp.arange(6, dtype=cp.float32).reshape(2, 3) + 5.0).sum())
+    assert result == expected
+    print("Test 'cupy_local_roundtrip' passed")
+
+
+def _cupy_stack_roundtrip_fn():
+    cp = _CUPY
+    assert cp is not None
+    tmp = cp.arange(4, dtype=cp.int32).reshape(2, 2) + greenlet.getcurrent().parent.switch(10)
+    return int(cp.asnumpy(tmp).sum())
+
+
+def test_cupy_stack_roundtrip():
+    if _get_cupy_with_gpu_or_none() is None:
+        return
+
+    gr = greenlet.greenlet(_cupy_stack_roundtrip_fn)
+    gr.switch()
+    serframe = skt.copy_frame_from_greenlet(gr, serialize=True)
+    capsule = skt.deserialize_frame(serframe)
+    assert capsule is not None
+    print("Test 'cupy_stack_roundtrip' passed")
+
+
+class _FakeGpuObject:
+    def __dlpack_device__(self):
+        return (2, 0)
+
+
+def _unsupported_gpu_backend_fn():
+    fake_gpu_obj = _FakeGpuObject()
+    _ = fake_gpu_obj
+    return skt.copy_current_frame(serialize=True, exclude_dead_locals=False)
+
+
+def test_gpu_unsupported_backend_fails():
+    try:
+        _unsupported_gpu_backend_fn()
+        assert False, "Expected RuntimeError for unsupported GPU backend"
+    except RuntimeError:
+        pass
+    print("Test 'gpu_unsupported_backend_fails' passed")
+
+
+def run_standard_tests():
+    test_copy_then_serialize()
+    test_combined_copy_serialize()
+    test_for_loop()
+    test_greenlet()
+    test_replace_locals()
+    test_exclude_locals()
+    test_copy_frame()
+    test_resume_greenlet()
+    test_capture_module_source_default_reconstruct()
+    test_capture_module_source_reconstruct_disabled()
+    test_capture_module_source_cross_file()
+    test_liveness()
+
+
+def run_gpu_tests():
+    script = textwrap.dedent(
+        """
+        import greenlet
+        import sauerkraut as skt
+        import cupy as cp
+
+        def local_fn(base):
+            arr = cp.arange(6, dtype=cp.float32).reshape(2, 3) + base
+            source_device = arr.device.id
+            greenlet.getcurrent().parent.switch()
+            assert isinstance(arr, cp.ndarray)
+            assert arr.device.id == source_device
+            arr = arr + 2
+            return float(cp.asnumpy(arr).sum())
+
+        gr = greenlet.greenlet(local_fn)
+        gr.switch(3.0)
+        ser = skt.copy_frame_from_greenlet(gr, serialize=True)
+        res = skt.deserialize_frame(ser, run=True)
+        expected = float(cp.asnumpy(cp.arange(6, dtype=cp.float32).reshape(2, 3) + 5.0).sum())
+        assert res == expected
+        print("Test 'cupy_local_roundtrip' passed")
+
+        def stack_fn():
+            tmp = cp.arange(4, dtype=cp.int32).reshape(2, 2) + greenlet.getcurrent().parent.switch(10)
+            return int(cp.asnumpy(tmp).sum())
+
+        gr2 = greenlet.greenlet(stack_fn)
+        gr2.switch()
+        ser2 = skt.copy_frame_from_greenlet(gr2, serialize=True)
+        cap = skt.deserialize_frame(ser2)
+        assert cap is not None
+        print("Test 'cupy_stack_roundtrip' passed")
+
+        class FakeGpuObject:
+            def __dlpack_device__(self):
+                return (2, 0)
+
+        def unsupported_fn():
+            fake_gpu_obj = FakeGpuObject()
+            _ = fake_gpu_obj
+            return skt.copy_current_frame(serialize=True, exclude_dead_locals=False)
+
+        try:
+            unsupported_fn()
+            raise AssertionError("Expected RuntimeError")
+        except RuntimeError:
+            print("Test 'gpu_unsupported_backend_fails' passed")
+        """
+    )
+
+    env = dict(os.environ)
+    env["LD_LIBRARY_PATH"] = f"{os.getcwd()}/sauerkraut:{env.get('LD_LIBRARY_PATH', '')}"
+    gpu_proc = subprocess.run(
+        [sys.executable, "-u", "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if gpu_proc.stdout:
+        print(gpu_proc.stdout, end="")
+    if gpu_proc.stderr:
+        print(gpu_proc.stderr, end="", file=sys.stderr)
+
+    assert gpu_proc.returncode == 0, (
+        f"GPU test subprocess failed with code {gpu_proc.returncode}"
+    )
+
+
+if __name__ == "__main__":
+    if "--gpu-tests-only" in sys.argv:
+        run_gpu_tests()
+    else:
+        run_standard_tests()
