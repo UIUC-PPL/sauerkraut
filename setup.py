@@ -244,5 +244,10 @@ setup(
     },
     zip_safe=False,
     python_requires=">=3.13",
-    install_requires=["bytecode @ git+https://github.com/ZwFink/bytecode.git", "numpy"],
+    install_requires=[
+        "bytecode @ git+https://github.com/ZwFink/bytecode.git",
+        "numpy",
+        "dill",
+        "greenlet",
+    ],
 )
