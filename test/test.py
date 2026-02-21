@@ -618,8 +618,11 @@ def test_cupy_stack_roundtrip():
     gr = greenlet.greenlet(_cupy_stack_roundtrip_fn)
     gr.switch()
     serframe = skt.copy_frame_from_greenlet(gr, serialize=True)
+    assert len(serframe) > 100, "Serialized frame too small; GPU data may be missing"
     capsule = skt.deserialize_frame(serframe)
     assert capsule is not None
+    re_serialized = skt.serialize_frame(capsule)
+    assert len(re_serialized) > 100, "Re-serialized frame too small; GPU data may be lost"
     print("Test 'cupy_stack_roundtrip' passed")
 
 

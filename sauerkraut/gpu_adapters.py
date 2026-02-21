@@ -1,8 +1,3 @@
-"""GPU object adapters used during frame locals/stack serialization.
-
-This module keeps imports lazy so Sauerkraut can still load in CPU-only environments.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -15,6 +10,9 @@ _GPU_BACKEND_CUPY = "cupy"
 _DL_DEVICE_TYPE_CUDA = 2
 _DL_DEVICE_TYPE_ROCM = 10
 _GPU_DEVICE_TYPES = {_DL_DEVICE_TYPE_CUDA, _DL_DEVICE_TYPE_ROCM}
+
+_cupy_cache = None
+_cupy_checked = False
 
 
 def _maybe_dlpack_device(obj: Any) -> tuple[int, int] | None:
@@ -37,11 +35,17 @@ def _maybe_dlpack_device(obj: Any) -> tuple[int, int] | None:
 
 
 def _import_cupy_or_none():
+    global _cupy_cache, _cupy_checked
+    if _cupy_checked:
+        return _cupy_cache
     try:
         import cupy as cp
+
+        _cupy_cache = cp
     except Exception:
-        return None
-    return cp
+        pass
+    _cupy_checked = True
+    return _cupy_cache
 
 
 def encode_maybe_gpu(obj: Any) -> Any:

@@ -158,8 +158,7 @@ class dumps_functor {
     pyobject_strongref operator()(PyObject *obj, bool adapt_gpu_locals=false) {
         pyobject_strongref maybe_gpu_obj;
         PyObject *to_dump = obj;
-        if (adapt_gpu_locals) {
-            // Only locals/stack use GPU envelopes; all other fields keep normal pickle behavior.
+        if (adapt_gpu_locals && PyObject_HasAttrString(obj, "__dlpack_device__")) {
             maybe_gpu_obj = pyobject_strongref::steal(PyObject_CallOneArg(*encode_maybe_gpu, obj));
             if (NULL == maybe_gpu_obj.borrow()) {
                 return pyobject_strongref(NULL);
@@ -191,6 +190,9 @@ class loads_functor {
             return loaded;
         }
         if (!adapt_gpu_locals) {
+            return loaded;
+        }
+        if (!PyDict_Check(loaded.borrow())) {
             return loaded;
         }
         PyObject *result = PyObject_CallOneArg(*decode_maybe_gpu, loaded.borrow());
