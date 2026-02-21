@@ -99,6 +99,18 @@ code = skt.deserialize_frame(read_frame)
 skt.run_frame(code)
 ```
 
+### Automatic GPU Locals (CuPy)
+When Sauerkraut serializes a frame, it inspects fast locals and the evaluation stack for GPU-resident
+objects via DLPack (`__dlpack_device__`).
+
+- Supported backend in this build: `cupy.ndarray`
+- Behavior: automatic (no extra flags)
+- Serialization flow: GPU value -> host bytes + metadata in checkpoint
+- Deserialization flow: host bytes -> CuPy array restored on original GPU device
+- Failure mode: explicit runtime error if restore backend/device is unavailable
+
+This keeps checkpoint values portable while preserving GPU placement semantics for CuPy arrays.
+
 ## Installation
 
 ### From PyPI (Recommended)

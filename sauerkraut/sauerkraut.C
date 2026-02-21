@@ -30,6 +30,9 @@ class sauerkraut_modulestate {
         pyobject_strongref dill_module;
         pyobject_strongref dill_dumps;
         pyobject_strongref dill_loads;
+        pyobject_strongref gpu_adapters_module;
+        pyobject_strongref encode_maybe_gpu;
+        pyobject_strongref decode_maybe_gpu;
         pyobject_strongref liveness_module;
         pyobject_strongref get_dead_variables_at_offset;
         PyCodeImmutableCache code_immutable_cache;
@@ -60,6 +63,12 @@ class sauerkraut_modulestate {
             if (!import_module("dill", dill_module) ||
                 !get_attr(dill_module, "dumps", dill_dumps) ||
                 !get_attr(dill_module, "loads", dill_loads)) {
+                return false;
+            }
+
+            if (!import_module("sauerkraut.gpu_adapters", gpu_adapters_module) ||
+                !get_attr(gpu_adapters_module, "encode_maybe_gpu", encode_maybe_gpu) ||
+                !get_attr(gpu_adapters_module, "decode_maybe_gpu", decode_maybe_gpu)) {
                 return false;
             }
 
@@ -129,6 +138,9 @@ class sauerkraut_modulestate {
             dill_module.reset();
             dill_dumps.reset();
             dill_loads.reset();
+            gpu_adapters_module.reset();
+            encode_maybe_gpu.reset();
+            decode_maybe_gpu.reset();
             liveness_module.reset();
             get_dead_variables_at_offset.reset();
         }
@@ -138,11 +150,23 @@ class sauerkraut_modulestate {
 class dumps_functor {
     pyobject_weakref pickle_dumps;
     pyobject_weakref _dill_dumps;
+    pyobject_weakref encode_maybe_gpu;
     public:
-    dumps_functor(pyobject_weakref pickle_dumps, pyobject_weakref _dill_dumps) : pickle_dumps(pickle_dumps), _dill_dumps(_dill_dumps) {}
+    dumps_functor(pyobject_weakref pickle_dumps, pyobject_weakref _dill_dumps, pyobject_weakref encode_maybe_gpu)
+        : pickle_dumps(pickle_dumps), _dill_dumps(_dill_dumps), encode_maybe_gpu(encode_maybe_gpu) {}
 
-    pyobject_strongref operator()(PyObject *obj) {
-        PyObject *result = PyObject_CallOneArg(*pickle_dumps, obj);
+    pyobject_strongref operator()(PyObject *obj, bool adapt_gpu_locals=false) {
+        pyobject_strongref maybe_gpu_obj;
+        PyObject *to_dump = obj;
+        if (adapt_gpu_locals) {
+            // Only locals/stack use GPU envelopes; all other fields keep normal pickle behavior.
+            maybe_gpu_obj = pyobject_strongref::steal(PyObject_CallOneArg(*encode_maybe_gpu, obj));
+            if (NULL == maybe_gpu_obj.borrow()) {
+                return pyobject_strongref(NULL);
+            }
+            to_dump = maybe_gpu_obj.borrow();
+        }
+        PyObject *result = PyObject_CallOneArg(*pickle_dumps, to_dump);
         return pyobject_strongref::steal(result);
     }
 
@@ -150,16 +174,26 @@ class dumps_functor {
         PyObject *result = PyObject_CallOneArg(*_dill_dumps, obj);
         return pyobject_strongref::steal(result);
     }
+
 };
 
 class loads_functor {
     pyobject_weakref pickle_loads;
     pyobject_weakref _dill_loads;
+    pyobject_weakref decode_maybe_gpu;
     public:
-    loads_functor(pyobject_weakref pickle_loads, pyobject_weakref _dill_loads) : pickle_loads(pickle_loads), _dill_loads(_dill_loads) {}
+    loads_functor(pyobject_weakref pickle_loads, pyobject_weakref _dill_loads, pyobject_weakref decode_maybe_gpu)
+        : pickle_loads(pickle_loads), _dill_loads(_dill_loads), decode_maybe_gpu(decode_maybe_gpu) {}
 
-    pyobject_strongref operator()(PyObject *obj) {
-        PyObject *result = PyObject_CallOneArg(*pickle_loads, obj);
+    pyobject_strongref operator()(PyObject *obj, bool adapt_gpu_locals=false) {
+        auto loaded = pyobject_strongref::steal(PyObject_CallOneArg(*pickle_loads, obj));
+        if (NULL == loaded.borrow()) {
+            return loaded;
+        }
+        if (!adapt_gpu_locals) {
+            return loaded;
+        }
+        PyObject *result = PyObject_CallOneArg(*decode_maybe_gpu, loaded.borrow());
         return pyobject_strongref::steal(result);
     }
 
@@ -167,6 +201,7 @@ class loads_functor {
         PyObject *result = PyObject_CallOneArg(*_dill_loads, obj);
         return pyobject_strongref::steal(result);
     }
+
 };
 
 
@@ -889,8 +924,14 @@ static PyObject *_serialize_frame_direct_from_capsule(frame_copy_capsule *copy_c
         return NULL;
     }
 
-    loads_functor loads(sauerkraut_state->pickle_loads, sauerkraut_state->dill_loads);
-    dumps_functor dumps(sauerkraut_state->pickle_dumps, sauerkraut_state->dill_dumps);
+    loads_functor loads(
+        sauerkraut_state->pickle_loads,
+        sauerkraut_state->dill_loads,
+        sauerkraut_state->decode_maybe_gpu);
+    dumps_functor dumps(
+        sauerkraut_state->pickle_dumps,
+        sauerkraut_state->dill_dumps,
+        sauerkraut_state->encode_maybe_gpu);
 
     flatbuffers::FlatBufferBuilder builder{args.sizehint};
     serdes::PyObjectSerdes po_serdes(loads, dumps);
@@ -1150,8 +1191,14 @@ static PyObject *_deserialize_frame(PyObject *bytes, bool inplace=false, bool re
         PyErr_Print();
         return NULL;
     }
-    loads_functor loads(sauerkraut_state->pickle_loads, sauerkraut_state->dill_loads);
-    dumps_functor dumps(sauerkraut_state->pickle_dumps, sauerkraut_state->dill_dumps);
+    loads_functor loads(
+        sauerkraut_state->pickle_loads,
+        sauerkraut_state->dill_loads,
+        sauerkraut_state->decode_maybe_gpu);
+    dumps_functor dumps(
+        sauerkraut_state->pickle_dumps,
+        sauerkraut_state->dill_dumps,
+        sauerkraut_state->encode_maybe_gpu);
     serdes::PyObjectSerdes po_serdes(loads, dumps);
     serdes::PyFrameSerdes frame_serdes{po_serdes};
 
