@@ -76,8 +76,8 @@ namespace serdes {
             }
 
             template<typename Builder>
-            offsets::PyObjectOffset serialize(Builder &builder, PyObject *obj) {
-                auto dumps_result = dumps(obj);
+            offsets::PyObjectOffset serialize(Builder &builder, PyObject *obj, bool adapt_gpu_locals=false) {
+                auto dumps_result = dumps(obj, adapt_gpu_locals);
                 if(NULL == dumps_result.borrow()) {
                     return 0;
                 }
@@ -92,7 +92,7 @@ namespace serdes {
                 return py_obj;
             }
 
-            auto deserialize(const pyframe_buffer::PyObject *obj) -> decltype(loads(nullptr)) {
+            auto deserialize(const pyframe_buffer::PyObject *obj, bool adapt_gpu_locals=false) -> decltype(loads(nullptr)) {
                 if(NULL == obj) {
                     return NULL;
                 }
@@ -104,7 +104,7 @@ namespace serdes {
                     return NULL;
                 }
                 auto bytes = pyobject_strongref::steal(PyBytes_FromStringAndSize((const char*)data, size));
-                auto retval = loads(bytes.borrow());
+                auto retval = loads(bytes.borrow(), adapt_gpu_locals);
                 return retval;
             }
 
@@ -544,7 +544,17 @@ namespace serdes {
                 if (stack_obj.obj == NULL) {
                     continue;
                 }
-                auto stack_obj_ser = po_serializer.serialize(builder, stack_obj.obj);
+                // Locals/stack are the only frame fields where we apply GPU envelope adaptation.
+                auto stack_obj_ser = po_serializer.serialize(builder, stack_obj.obj, true);
+                if (stack_obj_ser.o == 0) {
+                    if (!PyErr_Occurred()) {
+                        PyErr_SetString(PyExc_RuntimeError, "Failed to serialize stack object.");
+                    }
+                    if (stack_obj.owned) {
+                        Py_DECREF(stack_obj.obj);
+                    }
+                    return 0;
+                }
                 stack.push_back(stack_obj_ser);
                 if (stack_obj.owned) {
                     Py_DECREF(stack_obj.obj);
@@ -591,7 +601,17 @@ namespace serdes {
                     continue;
                 }
 
-                auto local_ser = po_serializer.serialize(builder, local_pyobj.obj);
+                // Locals/stack are the only frame fields where we apply GPU envelope adaptation.
+                auto local_ser = po_serializer.serialize(builder, local_pyobj.obj, true);
+                if (local_ser.o == 0) {
+                    if (!PyErr_Occurred()) {
+                        PyErr_SetString(PyExc_RuntimeError, "Failed to serialize local object.");
+                    }
+                    if (local_pyobj.owned) {
+                        Py_DECREF(local_pyobj.obj);
+                    }
+                    return std::make_pair(0, 0);
+                }
                 localsplus.push_back(local_ser);
                 if (local_pyobj.owned) {
                     Py_DECREF(local_pyobj.obj);
@@ -729,7 +749,7 @@ namespace serdes {
                     deser.localsplus.push_back(Py_None);
                 } else {
                     // This local was included, get it from the serialized data
-                    deser.localsplus.push_back(po_serializer.deserialize(localsplus->Get(localsplus_idx++)));
+                    deser.localsplus.push_back(po_serializer.deserialize(localsplus->Get(localsplus_idx++), true));
                 }
             }
 
@@ -740,7 +760,7 @@ namespace serdes {
             }
             deser.stack.reserve(stack->size());
             for(auto stack_obj : *stack) {
-                deser.stack.push_back(po_serializer.deserialize(stack_obj));
+                deser.stack.push_back(po_serializer.deserialize(stack_obj, true));
             }
 
             return deser;
